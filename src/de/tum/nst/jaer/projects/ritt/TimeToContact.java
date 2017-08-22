@@ -70,14 +70,14 @@ public class TimeToContact extends EventFilter2D implements FrameAnnotater {
 
     //  ______filtering incoming events
     // valid flow vector angle in degrees, +- vector to center from current pixel
-    private final double validAngle = 55 * Math.PI / 180.0;
+    private float validAngle = getFloat("validAngle", (float) (120) );// * Math.PI / 180.0) );
     // turn diverging field around center filter on/off
     private boolean centralFilter = getBoolean("centralFilter", true);
     // center coordinates of current sensor
     private int centerX, centerY;
     // radius of evaluated pixels around current foe for probability update
     private int updateR = getInt("updateR", 50);
-    
+
     // _______ground truth related
     // variable that gives availability of ground truth data
     private boolean importedGTfromFile = false;
@@ -90,7 +90,6 @@ public class TimeToContact extends EventFilter2D implements FrameAnnotater {
     private final AbstractMotionFlow flowFilter;
 
     //____________________Variables for user handling___________________________
-    
     private boolean displayFOE = getBoolean("displayFOE", true);
     private boolean displayRawInput = getBoolean("displayRawInput", true);
 
@@ -103,7 +102,7 @@ public class TimeToContact extends EventFilter2D implements FrameAnnotater {
         super(chip);
 
         // configure enclosed filter that creates optical flow events
-        flowFilter = new LucasKanadeFlow(chip); // new LocalPlanesFlow(chip);//TODO: make adaptable to other optical flow algos
+        flowFilter = new LocalPlanesFlow(chip);//new LucasKanadeFlow(chip); // TODO: make adaptable to other optical flow algos
         flowFilter.setDisplayRawInput(false); // to pass flow events not raw in        
         setEnclosedFilter(flowFilter);
 
@@ -116,6 +115,8 @@ public class TimeToContact extends EventFilter2D implements FrameAnnotater {
         setPropertyTooltip("Focus of Expansion", "updateR", "radius [pixels] around current FOE where probability is updated");
         setPropertyTooltip("Focus of Expansion", "displayFOE", "shows the estimated focus of expansion (FOE)");
         setPropertyTooltip("Focus of Expansion", "centralFilter", "turn filter for diverging field around center on/off");
+        setPropertyTooltip("Focus of Expansion", "validAngle", "valid angle for central filter. flow events with angle between"
+                + " distance to center and flow direction greater than validAngle are discarded");
         setPropertyTooltip("View", "displayRawInput", "shows the input events, instead of the motion types");
 
     }
@@ -132,6 +133,7 @@ public class TimeToContact extends EventFilter2D implements FrameAnnotater {
         Iterator i = null;
         i = ((EventPacket) flowPacket).inputIterator();
 
+        // loop the events in the package
         while (i.hasNext()) {
             Object o = i.next();
             if (o == null) {
@@ -155,16 +157,16 @@ public class TimeToContact extends EventFilter2D implements FrameAnnotater {
             vx = ein.velocity.x;
             vy = ein.velocity.y;
 
-            if (centralFilter && getRelAngle(x - centerX, y - centerY, vx, vy) > validAngle) {
+            if (centralFilter && getRelAngle(x - centerX, y - centerY, vx, vy) > validAngle*Math.PI/180) {
                 ein.setFilteredOut(true);
                 filteredOutCentral++;
                 continue;
             }
 
+            int foeXtemp = foeX;
+            int foeYtemp = foeY;
             // FOE calculation (cf. Clady 2014)
-            //for (ix = 0; ix < sizex; ++ix) {
-            //for (iy = 0; iy < sizey; ++iy) {
-            //ensure boundaries of pixels validated do not violate pixel dimensions
+            //ensure boundaries of pixels validated do not violate pixel dimensions            
             int lbx = foeX - updateR;
             int ubx = foeX + updateR;
             if (lbx < 0) {
@@ -173,9 +175,9 @@ public class TimeToContact extends EventFilter2D implements FrameAnnotater {
             if (ubx > sizex) {
                 ubx = sizex;
             }
-            for (ix = lbx; ix < sizex; ++ix) {
-                int lby = (int) Math.round( foeY - Math.sqrt(updateR*updateR-(ix-foeX)*(ix-foeX)) );
-                int uby = (int) Math.round( foeY + Math.sqrt(updateR*updateR-(ix-foeX)*(ix-foeX)) );
+            for (ix = lbx; ix < ubx; ++ix) {
+                int lby = (int) Math.round(foeYtemp - Math.sqrt(updateR * updateR - (ix - foeXtemp) * (ix - foeXtemp)));
+                int uby = (int) Math.round(foeYtemp + Math.sqrt(updateR * updateR - (ix - foeXtemp) * (ix - foeXtemp)));
                 if (lby < 0) {
                     lby = 0;
                 }
@@ -199,6 +201,7 @@ public class TimeToContact extends EventFilter2D implements FrameAnnotater {
                 }
             }
         }// end while(i.hasNext())
+        //log.info("current foe winner "+foeX+", "+foeY+" with probability = "+mProb[foeX][foeY]+ " time since last update = " +(ts - mTime[foeX][foeY]));
         //int currentGTIndex = binarySearch(ts*1e-6);
         //System.out.println("speed = " + filteredOutSpeed + " central = " + filteredOutCentral + " foeX = " + foeX + " foeY = " + foeY
         //+ " corresponding gt foeX=" + gtFoeX.get(currentGTIndex) + " foeY=" +gtFoeY.get(currentGTIndex) + " at time ts=" + ts
@@ -209,10 +212,7 @@ public class TimeToContact extends EventFilter2D implements FrameAnnotater {
     /**
      * Returns the relative unsigned angle between vectors v1(x1,y1) & v2(x2,y2)
      */
-    /**
-     * Returns the relative unsigned angle between vectors v1(x1,y1) & v2(x2,y2)
-     */
-    private double getRelAngle(double x1, double y1, double x2, double y2) {
+    private synchronized double getRelAngle(double x1, double y1, double x2, double y2) {
         double normalize1 = 1 / Math.sqrt(x1 * x1 + y1 * y1);
         double normalize2 = 1 / Math.sqrt(x2 * x2 + y2 * y2);
         return Math.acos(normalize1 * normalize2 * (x1 * x2 + y1 * y2));
@@ -241,24 +241,23 @@ public class TimeToContact extends EventFilter2D implements FrameAnnotater {
     public final void initFilter() {
         resetFilter();
     }
-    
-    
+
     // Allows importing two 2D-arrays containing the x-/y- components of the 
     // motion flow field used as ground truth.
-    synchronized public void doImportGTfromFile() {      
+    synchronized public void doImportGTfromFile() {
         JFileChooser chooser = new JFileChooser();
         chooser.setDialogTitle("Choose ground truth file");
         chooser.setFileSelectionMode(JFileChooser.FILES_ONLY);
         chooser.setMultiSelectionEnabled(false);
-                
+
         gtTime = new Vector<Double>();
         gtFoeX = new Vector<Float>();
         gtFoeY = new Vector<Float>();
         BufferedReader reader = null;
         File file = null;
         if (chooser.showOpenDialog(chip.getAeViewer().getFilterFrame()) == JFileChooser.APPROVE_OPTION) {
-            try {                
-                file = new File(chooser.getSelectedFile().getPath());                
+            try {
+                file = new File(chooser.getSelectedFile().getPath());
 
                 log.info("Imported ground truth file");
                 reader = new BufferedReader(new FileReader(file));
@@ -272,7 +271,7 @@ public class TimeToContact extends EventFilter2D implements FrameAnnotater {
                     }
                     gtTime.add(Double.parseDouble(columns[0]));
                     gtFoeX.add((float) Double.parseDouble(columns[22]));
-                    gtFoeY.add((float) Double.parseDouble(columns[23]));            
+                    gtFoeY.add((float) Double.parseDouble(columns[23]));
                 }
                 importedGTfromFile = true;
             } catch (FileNotFoundException e) {
@@ -286,11 +285,11 @@ public class TimeToContact extends EventFilter2D implements FrameAnnotater {
                     }
                 } catch (IOException e) {
                 }
-            }           
+            }
         }
-        log.info("import of ground truth done, data with times from "+gtTime.firstElement()+" to "+gtTime.lastElement());             
+        log.info("import of ground truth done, data with times from " + gtTime.firstElement() + " to " + gtTime.lastElement());
     }
-    
+
     void resetGroundTruth() {
         importedGTfromFile = false;
         gtTime = null;
@@ -301,7 +300,7 @@ public class TimeToContact extends EventFilter2D implements FrameAnnotater {
     synchronized public void doResetGroundTruth() {
         resetGroundTruth();
     }
-    
+
     public float getTProb() {
         return this.tProb;
     }
@@ -311,6 +310,15 @@ public class TimeToContact extends EventFilter2D implements FrameAnnotater {
         putFloat("tProb", tProb_);
     }
     
+    public float getValidAngle() {
+        return this.validAngle;
+    }
+
+    public void setValidAngle(final float ValidAngle_) {
+        this.validAngle = ValidAngle_;
+        putFloat("validAngle", ValidAngle_);
+    }
+
     public int getUpdateR() {
         return this.updateR;
     }
@@ -328,7 +336,7 @@ public class TimeToContact extends EventFilter2D implements FrameAnnotater {
         this.displayFOE = displayFOE_;
         putBoolean("displayFOE", displayFOE_);
     }
-    
+
     public boolean isCentralFilter() {
         return centralFilter;
     }
@@ -362,7 +370,7 @@ public class TimeToContact extends EventFilter2D implements FrameAnnotater {
             DrawGL.drawCircle(gl, foeX, foeY, 4, 15);
             gl.glPopMatrix();
         }
-        
+
         if (importedGTfromFile) {
             if (!isFilterEnabled()) {
                 return;
@@ -373,23 +381,23 @@ public class TimeToContact extends EventFilter2D implements FrameAnnotater {
             }
             checkBlend(gl);
             gl.glPushMatrix();
-            int currentGTIndex = binarySearch(ts*1e-6);
-            DrawGL.drawBox(gl, gtFoeX.get(currentGTIndex), gtFoeY.get(currentGTIndex), 4, 4, 0);
+            int currentGTIndex = binarySearch(ts * 1e-6);
+            DrawGL.drawBox(gl, gtFoeX.get(currentGTIndex), gtFoeY.get(currentGTIndex), 4, 4, (float) (45 * Math.PI / 180));
             gl.glPopMatrix();
         }
     }
-    
+
     // returns the index of the timestamp in GT data closest to current time
     private int binarySearch(double time) {
         if (!importedGTfromFile) {
             return 0;
         }
-        
-        if(time < gtTime.firstElement()) {
+
+        if (time < gtTime.firstElement()) {
             return 0;
         }
-        if(time > gtTime.lastElement()) {
-            return gtTime.size()-1;
+        if (time > gtTime.lastElement()) {
+            return gtTime.size() - 1;
         }
 
         int lo = 0;
