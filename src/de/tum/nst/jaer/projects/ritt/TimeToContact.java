@@ -56,11 +56,23 @@ public class TimeToContact extends EventFilter2D implements FrameAnnotater {
 
     //____________________Variables for TTC algortihm___________________________
     // indices for pixels
-    int ix, iy;
+    private int ix, iy;
     // lower and upper bounds for pixel iteration
-    int lbx, ubx, lby, uby;
+    private int lbx, ubx, lby, uby;
     // location of obstacle (first from rendering selection chip.getCanvas().getRenderer().getXsel()
-    int obstX, obstY;
+    private int obstX, obstY;
+    // distance between current event and foe estimate
+    private int distPx, distPy;
+    // distance threshold for discarding to far away events in pixels
+    private int threshDist = getInt("threshDist", 20);
+    // velocity threshold for discarding too slow events in [pixels/s]
+    private float threshVel = getFloat("threshVel",5f);
+    // time threshold for discarding too long away ttc times [s]
+    private float threshTTC = getFloat("threshTTC",10f);
+    // current (for this event) ttc estimate in [s]
+    private double currTTC;
+    // overall lowest ttc estimate in [s]
+    private double ttc = 100;
 
     //____________________Variables for FOE algorithm___________________________
     // Matrix containing probability of FOE, last time updated
@@ -109,7 +121,7 @@ public class TimeToContact extends EventFilter2D implements FrameAnnotater {
         super(chip);
 
         // configure enclosed filter that creates optical flow events
-        flowFilter = new LocalPlanesFlow(chip);//new LucasKanadeFlow(chip); // TODO: make adaptable to other optical flow algos
+        flowFilter = new LucasKanadeFlow(chip); //new LocalPlanesFlow(chip);// TODO: make adaptable to other optical flow algos
         flowFilter.setDisplayRawInput(false); // to pass flow events not raw in        
         setEnclosedFilter(flowFilter);
 
@@ -119,6 +131,9 @@ public class TimeToContact extends EventFilter2D implements FrameAnnotater {
         setPropertyTooltip("resetGroundTruth", "Resets the ground truth focus of expansion loaded from file.");
         setPropertyTooltip("startLoggingFOE", "logs the estimated FOE position");
         setPropertyTooltip("stopLoggingFOE", "stops logging the estimated FOE position");
+        setPropertyTooltip("Time to Contact", "threshDist", "distance threshold for events being considered in ttc estimation (in pixels)");
+        setPropertyTooltip("Time to Contact", "threshVel", "velocity threshold for events being considered in ttc estimation (in pixels/s)");
+        setPropertyTooltip("Time to Contact", "threshTTC", "ttc threshold for events being considered in ttc estimation (s)");
         setPropertyTooltip("Focus of Expansion", "tProb", "time constant [microsec]"
                 + " for probability decay of FOE position");
         setPropertyTooltip("Focus of Expansion", "updateR", "radius [pixels] around current FOE where probability is updated");        
@@ -127,7 +142,6 @@ public class TimeToContact extends EventFilter2D implements FrameAnnotater {
                 + " distance to center and flow direction greater than validAngle are discarded");
         setPropertyTooltip("Focus of Expansion", "displayFOE", "shows the estimated focus of expansion (FOE)");
         setPropertyTooltip("View", "displayRawInput", "shows the input events, instead of the motion types");
-
     }
 
     @Override
@@ -168,15 +182,13 @@ public class TimeToContact extends EventFilter2D implements FrameAnnotater {
 
             int distXcenter = x - centerX;
             int distYcenter = y - centerY;
-            if (centralFilter && Math.sqrt(distXcenter*distXcenter + distYcenter*distYcenter)>updateR 
+            if ( false && centralFilter && Math.sqrt(distXcenter*distXcenter + distYcenter*distYcenter)>updateR 
                     && getRelAngle(distXcenter, distYcenter, vx, vy) > validAngle*Math.PI/180) {
                 ein.setFilteredOut(true);
                 filteredOutCentral++;
                 continue;
             }
 
-            int foeXtemp = foeX;
-            int foeYtemp = foeY;
             // FOE calculation (cf. Clady 2014)
             // ensure boundaries of pixels validated do not violate pixel dimensions            
             lbx = centerX - updateR;
@@ -202,7 +214,7 @@ public class TimeToContact extends EventFilter2D implements FrameAnnotater {
                         mProb[ix][iy] += 1;
                         mTime[ix][iy] = ts;
                     } else {
-                        mProb[ix][iy] = mProb[ix][iy] * Math.exp(-(ts - mTime[ix][iy]) / tProb);
+                        mProb[ix][iy] = mProb[ix][iy] * Math.exp(-Math.abs(ts - mTime[ix][iy]) / tProb);
                     }
 
                     if (mProb[ix][iy] > mProbMax) {
@@ -215,34 +227,49 @@ public class TimeToContact extends EventFilter2D implements FrameAnnotater {
         
             // TTC calculation (cf. Clady 2014)
             // for now, no obstacle detection, rather obstacle selection
-            obstX = chip.getCanvas().getRenderer().getXsel();
-            obstY = chip.getCanvas().getRenderer().getYsel();
-            if (obstX > 0 || obstY > 0) {                
-                // how to determine flow magnitude for selection?
-                // how to average for selection?
-                // best case: object detection and overall optical flow for this selection
+            //obstX = chip.getCanvas().getRenderer().getXsel();
+            //obstY = chip.getCanvas().getRenderer().getYsel();
+            distPx = x - foeX;
+            distPy = y - foeY;
+            if (threshDist > Math.sqrt(distPx*distPx+distPy*distPy)) {
+                if (threshVel > Math.sqrt(vx*vx + vy*vy)) {
+                    if (centralFilter && getRelAngle(distXcenter, distYcenter, vx, vy) > validAngle*Math.PI/180) {
+                        currTTC = 0.5 * (distPx/vx + distPy/vy);
+                        if (currTTC < threshTTC) {
+                            ttc = currTTC;
+                        } 
+                    }
+                }
             }
+
         }// end while(i.hasNext())               
 
         // if logging is turned on, then foe estimation results are logged to file after every packet
         if (foeEstimationLogger != null && foeEstimationLogger.isEnabled()) {
-            String s;
-            if (importedGTfromFile) {
-                int currentGTIndex = binarySearch(ts * 1e-6);
-                s = String.format("%d %d %d %g %g %g", ts, foeX, foeY, gtFoeX.get(currentGTIndex), gtFoeY.get(currentGTIndex), mProb[foeX][foeY]);
-            } else {
-                s = String.format("%d %d %d %g", ts, foeX, foeY, mProb[foeX][foeY]);
-            }
-            foeEstimationLogger.log(s);
+            logFoeData();
         }
         
-        log.info("current foe winner "+foeX+", "+foeY+" with probability = "
-        +mProb[foeX][foeY]+ " time since last update = " +(ts - mTime[foeX][foeY]));
+        //log.info("current foe winner "+foeX+", "+foeY+" with probability = "
+        //+mProb[foeX][foeY]+ " time since last update = " +(ts - mTime[foeX][foeY]));
         //int currentGTIndex = binarySearch(ts*1e-6);
         //System.out.println("speed = " + filteredOutSpeed + " central = " + filteredOutCentral + " foeX = " + foeX + " foeY = " + foeY
         //+ " corresponding gt foeX=" + gtFoeX.get(currentGTIndex) + " foeY=" +gtFoeY.get(currentGTIndex) + " at time ts=" + ts
         //+ " with index " + currentGTIndex);
         return isDisplayRawInput() ? in : flowPacket;
+    }
+    
+    /**
+     * logs relevant FOE information to file
+     */
+    private void logFoeData() {
+        String s;
+        if (importedGTfromFile) {
+            int currentGTIndex = binarySearch(ts * 1e-6);
+            s = String.format("%d %d %d %g %g %g %g", ts, foeX, foeY, gtFoeX.get(currentGTIndex), gtFoeY.get(currentGTIndex), mProb[foeX][foeY], ttc);
+        } else {
+            s = String.format("%d %d %d %g %g", ts, foeX, foeY, mProb[foeX][foeY], ttc);
+        }
+        foeEstimationLogger.log(s);
     }
 
     /**
@@ -356,9 +383,9 @@ public class TimeToContact extends EventFilter2D implements FrameAnnotater {
             foeEstimationLogger = new TobiLogger(file.getPath(), "Focus of expansion estimation results from optical flow");
             foeEstimationLogger.setNanotimeEnabled(false);
             if (importedGTfromFile) {
-                foeEstimationLogger.setHeaderLine("system_time(ms) timestamp(us) foeX foeY foeXgt foeYgt winningProb");
+                foeEstimationLogger.setHeaderLine("system_time(ms) timestamp(us) foeX foeY foeXgt foeYgt winningProb ttc");
             } else {
-                foeEstimationLogger.setHeaderLine("system_time(ms) timestamp(us) foeX foeY winningProb");
+                foeEstimationLogger.setHeaderLine("system_time(ms) timestamp(us) foeX foeY winningProb ttc");
             }
             foeEstimationLogger.setEnabled(true);
         } else {
@@ -374,6 +401,15 @@ public class TimeToContact extends EventFilter2D implements FrameAnnotater {
         foeEstimationLogger = null;
     }
 
+    public int getUpdateR() {
+        return this.updateR;
+    }
+
+    public void setUpdateR(final int updateR_) {
+        this.updateR = updateR_;
+        putInt("updateR", updateR_);
+    }
+    
     public float getTProb() {
         return this.tProb;
     }
@@ -383,13 +419,31 @@ public class TimeToContact extends EventFilter2D implements FrameAnnotater {
         putFloat("tProb", tProb_);
     }
     
-    public int getUpdateR() {
-        return this.updateR;
+    public int getThreshDist() {
+        return this.threshDist;
     }
 
-    public void setUpdateR(final int updateR_) {
-        this.updateR = updateR_;
-        putInt("updateR", updateR_);
+    public void setThreshDist(final int threshDist_) {
+        this.threshDist = threshDist_;
+        putInt("threshDist", threshDist_);
+    }
+    
+    public float getThreshVel() {
+        return this.threshVel;
+    }
+
+    public void setThreshVel(final float threshVel_) {
+        this.threshVel = threshVel_;
+        putFloat("threshVel", threshVel_);
+    }
+    
+    public float getThreshTTC() {
+        return this.threshTTC;
+    }
+
+    public void setThreshTTC(final float threshTTC_) {
+        this.threshTTC = threshTTC_;
+        putFloat("threshTTC", threshTTC_);
     }
     
     public boolean isCentralFilter() {
