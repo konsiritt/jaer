@@ -64,15 +64,21 @@ public class TimeToContact extends EventFilter2D implements FrameAnnotater {
     // distance between current event and foe estimate
     private int distPx, distPy;
     // distance threshold for discarding to far away events in pixels
-    private int threshDist = getInt("threshDist", 20);
+    private int threshDist = getInt("threshDist", 30);
     // velocity threshold for discarding too slow events in [pixels/s]
-    private float threshVel = getFloat("threshVel",5f);
+    private float threshVel = getFloat("threshVel",0.5f);
     // time threshold for discarding too long away ttc times [s]
     private float threshTTC = getFloat("threshTTC",10f);
     // current (for this event) ttc estimate in [s]
     private double currTTC;
     // overall lowest ttc estimate in [s]
-    private double ttc = 100;
+    private double ttc = 0;
+    // update weight for EMA 
+    private float alphaTTC = getFloat("alphaTTC",0.033f);;
+    // amount of initial updates
+    private int countInitTTC;
+    // threshold for initialization of ttc estimate
+    private int threshInitTTC = 10; 
 
     //____________________Variables for FOE algorithm___________________________
     // Matrix containing probability of FOE, last time updated
@@ -134,6 +140,7 @@ public class TimeToContact extends EventFilter2D implements FrameAnnotater {
         setPropertyTooltip("Time to Contact", "threshDist", "distance threshold for events being considered in ttc estimation (in pixels)");
         setPropertyTooltip("Time to Contact", "threshVel", "velocity threshold for events being considered in ttc estimation (in pixels/s)");
         setPropertyTooltip("Time to Contact", "threshTTC", "ttc threshold for events being considered in ttc estimation (s)");
+        setPropertyTooltip("Time to Contact", "alphaTTC", "averaging ttc threshold for per event contribution");
         setPropertyTooltip("Focus of Expansion", "tProb", "time constant [microsec]"
                 + " for probability decay of FOE position");
         setPropertyTooltip("Focus of Expansion", "updateR", "radius [pixels] around current FOE where probability is updated");        
@@ -156,6 +163,9 @@ public class TimeToContact extends EventFilter2D implements FrameAnnotater {
         Iterator i = null;
         i = ((EventPacket) flowPacket).inputIterator();
 
+        //temporary counter
+        int tempCountTtcEstimates = 0;
+        
         // loop the events in the package
         while (i.hasNext()) {
             Object o = i.next();
@@ -229,21 +239,32 @@ public class TimeToContact extends EventFilter2D implements FrameAnnotater {
             // for now, no obstacle detection, rather obstacle selection
             //obstX = chip.getCanvas().getRenderer().getXsel();
             //obstY = chip.getCanvas().getRenderer().getYsel();
-            distPx = x - foeX;
-            distPy = y - foeY;
+            int currentGTIndex = binarySearch(ts * 1e-6);
+            
+            distPx = x - Math.round( gtFoeX.get(currentGTIndex) );//foeX;
+            distPy = y - Math.round( gtFoeY.get(currentGTIndex) );//foeY;
             if (threshDist > Math.sqrt(distPx*distPx+distPy*distPy)) {
-                if (threshVel > Math.sqrt(vx*vx + vy*vy)) {
-                    if (centralFilter && getRelAngle(distXcenter, distYcenter, vx, vy) > validAngle*Math.PI/180) {
+                if (threshVel < Math.sqrt(vx*vx + vy*vy)) {
+                    if (centralFilter && getRelAngle(distPx, distPy, vx, vy) < validAngle*Math.PI/180) {
                         currTTC = 0.5 * (distPx/vx + distPy/vy);
-                        if (currTTC < threshTTC) {
-                            ttc = currTTC;
-                        } 
-                    }
-                }
-            }
+                        if (currTTC < threshTTC && currTTC > 0) {
+                            if (ttc==0) {
+                                ttc = currTTC;
+                            } else if (countInitTTC<threshInitTTC){
+                                ttc = (countInitTTC*ttc + currTTC)/++countInitTTC;
+                            }else {
+                                ttc += alphaTTC*(currTTC-ttc); 
+                                tempCountTtcEstimates++;
+                            }
+                        } else {ein.setFilteredOut(true);}
+                    } else {ein.setFilteredOut(true);}
+                } else {ein.setFilteredOut(true);}
+            } else {ein.setFilteredOut(true);}
 
         }// end while(i.hasNext())               
 
+        log.info("Amount of contributing ttc estimates: " + tempCountTtcEstimates + " with current ttc estimate: " + ttc);
+        
         // if logging is turned on, then foe estimation results are logged to file after every packet
         if (foeEstimationLogger != null && foeEstimationLogger.isEnabled()) {
             logFoeData();
@@ -294,6 +315,7 @@ public class TimeToContact extends EventFilter2D implements FrameAnnotater {
         centerY = sizey / 2 - 1;
         foeX = centerX;
         foeY = centerY;
+        countInitTTC = 0;
     }
 
     /**
@@ -444,6 +466,15 @@ public class TimeToContact extends EventFilter2D implements FrameAnnotater {
     public void setThreshTTC(final float threshTTC_) {
         this.threshTTC = threshTTC_;
         putFloat("threshTTC", threshTTC_);
+    }
+    
+    public float getAlphaTTC() {
+        return this.alphaTTC;
+    }
+
+    public void setAlphaTTC(final float alphaTTC_) {
+        this.alphaTTC = alphaTTC_;
+        putFloat("alphaTTC", alphaTTC_);
     }
     
     public boolean isCentralFilter() {
