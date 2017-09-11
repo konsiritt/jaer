@@ -165,6 +165,8 @@ public class TimeToContact extends EventFilter2D implements FrameAnnotater {
 
         //temporary counter
         int tempCountTtcEstimates = 0;
+        //temporary package average
+        double tempPackageAvgTTC = 0;
         
         // loop the events in the package
         while (i.hasNext()) {
@@ -242,28 +244,33 @@ public class TimeToContact extends EventFilter2D implements FrameAnnotater {
             int currentGTIndex = binarySearch(ts * 1e-6);
             
             distPx = x - Math.round( gtFoeX.get(currentGTIndex) );//foeX;
-            distPy = y - Math.round( gtFoeY.get(currentGTIndex) );//foeY;
-            if (threshDist > Math.sqrt(distPx*distPx+distPy*distPy)) {
-                if (threshVel < Math.sqrt(vx*vx + vy*vy)) {
-                    if (centralFilter && getRelAngle(distPx, distPy, vx, vy) < validAngle*Math.PI/180) {
-                        currTTC = 0.5 * (distPx/vx + distPy/vy);
-                        if (currTTC < threshTTC && currTTC > 0) {
-                            if (ttc==0) {
-                                ttc = currTTC;
-                            } else if (countInitTTC<threshInitTTC){
-                                ttc = (countInitTTC*ttc + currTTC)/++countInitTTC;
-                            }else {
-                                ttc += alphaTTC*(currTTC-ttc); 
-                                tempCountTtcEstimates++;
-                            }
-                        } else {ein.setFilteredOut(true);}
-                    } else {ein.setFilteredOut(true);}
-                } else {ein.setFilteredOut(true);}
-            } else {ein.setFilteredOut(true);}
+            distPy = y - Math.round(gtFoeY.get(currentGTIndex));//foeY;
+            if (threshDist > Math.sqrt(distPx * distPx + distPy * distPy) //only include events in circle of threshDist pixels around the foe
+                    && Math.sqrt(distPx * distPx + distPy * distPy) > 10 //do not include events too close to the foe
+                    && threshVel < Math.sqrt(vx * vx + vy * vy) //only include flow events with sufficiently large flow velocity
+                    && getRelAngle(distPx, distPy, vx, vy) < validAngle * Math.PI / 180  //only include flow events diverging from foe
+                    && vy < 0 && distPy < 0 ) // hack: only include flow events below the foe
+            {
+                currTTC = 0.5 * (distPx / vx + distPy / vy);
+                if (currTTC < threshTTC && currTTC > 0) {
+                    if (ttc == 0) { //initialize
+                        ttc = currTTC;
+                    } else if (countInitTTC < threshInitTTC) { //initialize for threshInitTTC estimates
+                        ttc = (countInitTTC * ttc + currTTC) / ++countInitTTC;
+                    } else {
+                        ttc += alphaTTC * (currTTC - ttc);
+                        tempPackageAvgTTC = (tempPackageAvgTTC * tempCountTtcEstimates + currTTC) / ++tempCountTtcEstimates;
+                    }
+                } else {
+                    ein.setFilteredOut(true);
+                }
+            } else {
+                ein.setFilteredOut(true);
+            }
 
         }// end while(i.hasNext())               
 
-        log.info("Amount of contributing ttc estimates: " + tempCountTtcEstimates + " with current ttc estimate: " + ttc);
+        log.info("Contributing ttc est: " + tempCountTtcEstimates + " overall ttc est: " + ttc + "per packet ttc: " + tempPackageAvgTTC);
         
         // if logging is turned on, then foe estimation results are logged to file after every packet
         if (foeEstimationLogger != null && foeEstimationLogger.isEnabled()) {
