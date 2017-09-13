@@ -15,7 +15,9 @@ import java.io.File;
 import java.io.FileNotFoundException;
 import java.io.FileReader;
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.Iterator;
+import java.util.List;
 import java.util.Vector;
 import java.util.logging.Level;
 import javax.swing.JFileChooser;
@@ -127,7 +129,7 @@ public class TimeToContact extends EventFilter2D implements FrameAnnotater {
         super(chip);
 
         // configure enclosed filter that creates optical flow events
-        flowFilter = new LucasKanadeFlow(chip); //new LocalPlanesFlow(chip);// TODO: make adaptable to other optical flow algos
+        flowFilter = new LocalPlanesFlow(chip);//new LucasKanadeFlow(chip); //new LocalPlanesFlow(chip);// TODO: make adaptable to other optical flow algos
         flowFilter.setDisplayRawInput(false); // to pass flow events not raw in        
         setEnclosedFilter(flowFilter);
 
@@ -194,7 +196,7 @@ public class TimeToContact extends EventFilter2D implements FrameAnnotater {
 
             int distXcenter = x - centerX;
             int distYcenter = y - centerY;
-            if ( false && centralFilter && Math.sqrt(distXcenter*distXcenter + distYcenter*distYcenter)>updateR 
+            if ( false && centralFilter && (distXcenter*distXcenter + distYcenter*distYcenter)>updateR*updateR 
                     && getRelAngle(distXcenter, distYcenter, vx, vy) > validAngle*Math.PI/180) {
                 ein.setFilteredOut(true);
                 filteredOutCentral++;
@@ -245,10 +247,10 @@ public class TimeToContact extends EventFilter2D implements FrameAnnotater {
             
             distPx = x - Math.round( gtFoeX.get(currentGTIndex) );//foeX;
             distPy = y - Math.round(gtFoeY.get(currentGTIndex));//foeY;
-            if (threshDist > Math.sqrt(distPx * distPx + distPy * distPy) //only include events in circle of threshDist pixels around the foe
-                    && Math.sqrt(distPx * distPx + distPy * distPy) > 10 //do not include events too close to the foe
+            if (threshDist*threshDist > (distPx * distPx + distPy * distPy) //only include events in circle of threshDist pixels around the foe
+                    && (distPx * distPx + distPy * distPy) > 100 //do not include events too close to the foe
                     && threshVel < Math.sqrt(vx * vx + vy * vy) //only include flow events with sufficiently large flow velocity
-                    && getRelAngle(distPx, distPy, vx, vy) < validAngle * Math.PI / 180  //only include flow events diverging from foe
+                    && getRelAngle(distPx, distPy, vx, vy) < validAngle * Math.PI / 180 //) //only include flow events diverging from foe
                     && vy < 0 && distPy < 0 ) // hack: only include flow events below the foe
             {
                 currTTC = 0.5 * (distPx / vx + distPy / vy);
@@ -581,6 +583,87 @@ public class TimeToContact extends EventFilter2D implements FrameAnnotater {
         }
         // lo == hi + 1
         return (gtTime.get(lo) - time) < (time - gtTime.get(hi)) ? lo : hi;
+    }
+    
+    
+    protected class clusterDetector implements FrameAnnotater{
+        //_______________________General variables______________________________
+        // amount of separate clusters allowed
+        private int clusters; 
+        // list with cluster elements
+        private List<cluster> clusterList;
+        
+        
+        
+        public clusterDetector(int clusters_) {
+            clusters = clusters_;
+            clusterList = new ArrayList<>(clusters);
+        }
+        
+        // interface: assigns ttc to a cluster, or creates new one
+        public synchronized void assignCluster(int x, int y, double ttc){
+            for (cluster s : clusterList) {
+                if (s.isInside(x,y)) {
+                    s.updateCluster(x,y,ttc);
+                    break;
+                }
+                    else{
+                    
+                }
+            }
+        }
+
+        @Override
+        public void setAnnotationEnabled(boolean yes) {
+            throw new UnsupportedOperationException("Not supported yet."); //To change body of generated methods, choose Tools | Templates.
+        }
+
+        @Override
+        public boolean isAnnotationEnabled() {
+            throw new UnsupportedOperationException("Not supported yet."); //To change body of generated methods, choose Tools | Templates.
+        }
+
+        @Override
+        public void annotate(GLAutoDrawable drawable) {
+            throw new UnsupportedOperationException("Not supported yet."); //To change body of generated methods, choose Tools | Templates.
+        }
+        
+        
+        protected class cluster {
+            // variable center point of cluster
+            private int centerX, centerY;
+            // variable dimensions of cluster (for now quadratic dimensions)
+            private int dim = 10; //dimX, dimY; //vs radius?
+            // ttc estimate [s]
+            private double ttc;
+            // update weight for ttc
+            private double alphaTTC = 0.01;
+            // distance from center for current event
+            private int distX, distY;
+            
+            public cluster(){                
+            }
+            
+            public cluster(int x, int y, double ttcNew){
+                centerX = x;
+                centerY = y;
+                ttc = ttcNew;
+            }
+            
+            // updates the per cluster values according to newly assigned ttc event
+            public void updateCluster (int x, int y, double ttcNew) {
+                ttc += alphaTTC * (ttcNew - ttc);
+                
+            }
+            
+            // returns true if x,y fall into the cluster
+            public boolean isInside (int x, int y) {
+                distX = Math.abs(x - centerX);
+                distY = Math.abs(y - centerY);
+                // consider it inside a square with dimension dim to either side
+                return !(distX>dim || distY>dim);
+            }
+        }
     }
 
 }
