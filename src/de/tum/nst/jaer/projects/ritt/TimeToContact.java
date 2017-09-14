@@ -10,6 +10,7 @@ import ch.unizh.ini.jaer.projects.rbodo.opticalflow.LocalPlanesFlow;
 import ch.unizh.ini.jaer.projects.rbodo.opticalflow.LucasKanadeFlow;
 import com.jogamp.opengl.GL2;
 import com.jogamp.opengl.GLAutoDrawable;
+import com.jogamp.opengl.util.gl2.GLUT;
 import java.io.BufferedReader;
 import java.io.File;
 import java.io.FileNotFoundException;
@@ -81,6 +82,8 @@ public class TimeToContact extends EventFilter2D implements FrameAnnotater {
     private int countInitTTC;
     // threshold for initialization of ttc estimate
     private int threshInitTTC = 10; 
+    // clustering of possible obstacles handled by object
+    private clusterDetector clusters = new clusterDetector(10);
 
     //____________________Variables for FOE algorithm___________________________
     // Matrix containing probability of FOE, last time updated
@@ -119,6 +122,7 @@ public class TimeToContact extends EventFilter2D implements FrameAnnotater {
     //____________________Variables for user handling___________________________
     private boolean displayFOE = getBoolean("displayFOE", true);
     private boolean displayRawInput = getBoolean("displayRawInput", true);
+    private boolean displayClusters = getBoolean("displayClusters", true);
 
     //_______________Variables for timing and performance_______________________
     private int filteredOutSpeed = 0;  // count events that are being omitted
@@ -151,6 +155,7 @@ public class TimeToContact extends EventFilter2D implements FrameAnnotater {
                 + " distance to center and flow direction greater than validAngle are discarded");
         setPropertyTooltip("Focus of Expansion", "displayFOE", "shows the estimated focus of expansion (FOE)");
         setPropertyTooltip("View", "displayRawInput", "shows the input events, instead of the motion types");
+        setPropertyTooltip("View", "displayClusters", "shows the clusters of events that can correspond to an obstacle in the path");
     }
 
     @Override
@@ -255,14 +260,17 @@ public class TimeToContact extends EventFilter2D implements FrameAnnotater {
             {
                 currTTC = 0.5 * (distPx / vx + distPy / vy);
                 if (currTTC < threshTTC && currTTC > 0) {
-                    if (ttc == 0) { //initialize
+                    
+                    clusters.assignCluster(x, y, currTTC, ts);
+                    
+                    /*if (ttc == 0) { //initialize
                         ttc = currTTC;
                     } else if (countInitTTC < threshInitTTC) { //initialize for threshInitTTC estimates
                         ttc = (countInitTTC * ttc + currTTC) / ++countInitTTC;
                     } else {
                         ttc += alphaTTC * (currTTC - ttc);
                         tempPackageAvgTTC = (tempPackageAvgTTC * tempCountTtcEstimates + currTTC) / ++tempCountTtcEstimates;
-                    }
+                    }*/
                 } else {
                     ein.setFilteredOut(true);
                 }
@@ -325,6 +333,7 @@ public class TimeToContact extends EventFilter2D implements FrameAnnotater {
         foeX = centerX;
         foeY = centerY;
         countInitTTC = 0;
+        clusters.reset();
     }
 
     /**
@@ -521,17 +530,27 @@ public class TimeToContact extends EventFilter2D implements FrameAnnotater {
         this.displayRawInput = displayRawInput;
         putBoolean("displayRawInput", displayRawInput);
     }
+    
+    public boolean isDisplayClusters() {
+        return displayClusters;
+    }
+
+    public void setDisplayClusters(boolean displayClusters_) {
+        this.displayClusters = displayClusters_;
+        putBoolean("displayClusters", displayClusters_);
+    }
 
     @Override
     public void annotate(GLAutoDrawable drawable) {
+        if (!isFilterEnabled()) {
+            return;
+        }
+
+        GL2 gl = drawable.getGL().getGL2();
+        if (gl == null) {
+            return;
+        }
         if (isDisplayFOE()) {
-            if (!isFilterEnabled()) {
-                return;
-            }
-            GL2 gl = drawable.getGL().getGL2();
-            if (gl == null) {
-                return;
-            }
             checkBlend(gl);
             gl.glPushMatrix();
             DrawGL.drawCircle(gl, foeX, foeY, 4, 15);
@@ -539,18 +558,15 @@ public class TimeToContact extends EventFilter2D implements FrameAnnotater {
         }
 
         if (importedGTfromFile) {
-            if (!isFilterEnabled()) {
-                return;
-            }
-            GL2 gl = drawable.getGL().getGL2();
-            if (gl == null) {
-                return;
-            }
             checkBlend(gl);
             gl.glPushMatrix();
             int currentGTIndex = binarySearch(ts * 1e-6);
             DrawGL.drawBox(gl, gtFoeX.get(currentGTIndex), gtFoeY.get(currentGTIndex), 4, 4, (float) (45 * Math.PI / 180));
             gl.glPopMatrix();
+        }
+        
+        if (isDisplayClusters()) {
+            clusters.draw(gl);
         }
     }
 
@@ -585,15 +601,17 @@ public class TimeToContact extends EventFilter2D implements FrameAnnotater {
         return (gtTime.get(lo) - time) < (time - gtTime.get(hi)) ? lo : hi;
     }
     
-    
-    protected class clusterDetector implements FrameAnnotater{
+    /**
+     * class that handles segmentation of clusters of events attributed to obstacles
+     */
+    protected class clusterDetector {
         //_______________________General variables______________________________
         // amount of separate clusters allowed
         private int clusters; 
         // list with cluster elements
-        private List<cluster> clusterList;
-        
-        
+        private List<cluster> clusterList;    
+        // activity threshold for removal
+        private double thActivity = 0.1;       
         
         public clusterDetector(int clusters_) {
             clusters = clusters_;
@@ -601,68 +619,153 @@ public class TimeToContact extends EventFilter2D implements FrameAnnotater {
         }
         
         // interface: assigns ttc to a cluster, or creates new one
-        public synchronized void assignCluster(int x, int y, double ttc){
-            for (cluster s : clusterList) {
-                if (s.isInside(x,y)) {
-                    s.updateCluster(x,y,ttc);
-                    break;
-                }
-                    else{
-                    
+        public synchronized void assignCluster(int xNew, int yNew, double ttcNew, int tsNew){
+            // event has (not) been assigned
+            boolean clAssigned = false;
+            // greatest shared area
+            double areaBest = 0;
+            // id of cluster with greatest shared area
+            int idBestCluster = -1;
+            
+            int i = 0;            
+            for (Iterator<cluster> iterator = clusterList.iterator(); iterator.hasNext(); i++){
+                cluster cl = iterator.next();   
+                if (!clAssigned) {
+                    double temp = cl.isInside(xNew, yNew);
+                    // if it is inside the cluster
+                    if (temp >= cl.getInitDim()*cl.getInitDim()) {
+                        cl.updateInCluster(xNew,yNew,ttcNew,tsNew);
+                        clAssigned = true;
+                    }else if (temp > areaBest) {
+                        areaBest = temp;
+                        idBestCluster = i;
+                    }
+                }                
+                // update exponential weight decay
+                cl.updateWeight(tsNew);
+                // remove clusters with weight below threshold
+                if (cl.getActivity() < thActivity) {
+                    iterator.remove();
+                    if (idBestCluster == i ) {
+                        idBestCluster = -1;
+                    }
+                    i--;                    
                 }
             }
+            
+            if (idBestCluster > 0) {
+                clusterList.get(idBestCluster).updateOutCluster(xNew, yNew, ttcNew, tsNew);
+                clAssigned = true;
+            }
+            
+            // think of method to assign closest cluster and increase its size vs add new cluster
+            
+            if (!clAssigned) {
+                clusterList.add(new cluster(xNew, yNew, ttcNew));
+            }            
         }
 
-        @Override
-        public void setAnnotationEnabled(boolean yes) {
-            throw new UnsupportedOperationException("Not supported yet."); //To change body of generated methods, choose Tools | Templates.
-        }
-
-        @Override
-        public boolean isAnnotationEnabled() {
-            throw new UnsupportedOperationException("Not supported yet."); //To change body of generated methods, choose Tools | Templates.
-        }
-
-        @Override
-        public void annotate(GLAutoDrawable drawable) {
-            throw new UnsupportedOperationException("Not supported yet."); //To change body of generated methods, choose Tools | Templates.
-        }
+        public void draw(GL2 gl) {
+            if (!isFilterEnabled()) {
+                return;
+            }
+            for (cluster cl : clusterList) {                
+                checkBlend(gl);
+                gl.glPushMatrix();
+                DrawGL.drawBox(gl, cl.getCenterX(), cl.getCenterY(), cl.getDim() * 2, cl.getDim() * 2, 0);
+                gl.glRasterPos2i(2, 10);
+                chip.getCanvas().getGlut().glutBitmapString(GLUT.BITMAP_HELVETICA_18,
+                        String.format("activity=%.2f", cl.clCountActivity));
+                gl.glRasterPos2i(2, 30);
+                chip.getCanvas().getGlut().glutBitmapString(GLUT.BITMAP_HELVETICA_18,
+                        String.format("dimension=%.2f", 2*cl.clDim));
+                gl.glRasterPos2i(2, 50);
+                chip.getCanvas().getGlut().glutBitmapString(GLUT.BITMAP_HELVETICA_18,
+                        String.format("ttc=%.2f", cl.clTTC));
+                gl.glPopMatrix();
+            }
+        }   
         
+        public void reset() {
+            clusterList.clear();
+        }
         
         protected class cluster {
             // variable center point of cluster
-            private int centerX, centerY;
-            // variable dimensions of cluster (for now quadratic dimensions)
-            private int dim = 10; //dimX, dimY; //vs radius?
+            private float clCenterX, clCenterY;
+            // variable dimensions (to both sides of center) of cluster (for now quadratic dimensions)
+            private float clDim; //dimX, dimY; //vs radius?
+            // initial dimension of cluster 
+            private final float initDim = 30;           
             // ttc estimate [s]
-            private double ttc;
-            // update weight for ttc
-            private double alphaTTC = 0.01;
-            // distance from center for current event
-            private int distX, distY;
+            private double clTTC;
+            // distance of intersection of clusters
+            private float clDistX, clDistY;
+            // timestamp of last update [microsec]
+            private int clLastUpdate;
+            // counter for activity of cluster
+            private double clCountActivity;
+            // time constant for counter activity degradation 
+            private final float clActUpdate = 100000.0f;
             
             public cluster(){                
             }
             
             public cluster(int x, int y, double ttcNew){
-                centerX = x;
-                centerY = y;
-                ttc = ttcNew;
+                clCenterX = x;
+                clCenterY = y;
+                clTTC = ttcNew;
+                clDim = initDim;
+                ++clCountActivity;
+            }            
+            
+            // updates the per cluster values according to inlier ttc event
+            public synchronized void updateInCluster (int xNew, int yNew, double ttcNew, int tsNew) {
+                clTTC += (ttcNew-clTTC)/++clCountActivity; //+= alphaTTC * (ttcNew - clTTC);              
+                clCenterX += (xNew-clCenterX)/clCountActivity;          
+                clCenterY += (yNew-clCenterY)/clCountActivity;
+                clLastUpdate = tsNew;
             }
             
-            // updates the per cluster values according to newly assigned ttc event
-            public void updateCluster (int x, int y, double ttcNew) {
-                ttc += alphaTTC * (ttcNew - ttc);
+            // updates the per cluster values according to outlier ttc event
+            public synchronized void updateOutCluster (int xNew, int yNew, double ttcNew, int tsNew) {
+                clTTC += (ttcNew-clTTC)/++clCountActivity;            
+                clCenterX += (xNew-clCenterX)/clCountActivity;          
+                clCenterY += (yNew-clCenterY)/clCountActivity;
+                clLastUpdate = tsNew;
+                clDim += 1/clCountActivity;
+            }
+            
+            // updates current weight of the cluster
+            public void updateWeight(int tsNew) {
+                clCountActivity = clCountActivity * Math.exp(-Math.abs(tsNew - clLastUpdate) / clActUpdate);
+            }
+            
+            // returns overlapping area(px*px) as a measure of closeness
+            // negative
+            public synchronized float isInside (int x, int y) {
+                clDistX = -Math.abs((float)x - clCenterX) + clDim + initDim;
+                clDistY = -Math.abs((float)y - clCenterY) + clDim + initDim;
+
+                return (clDistX < 0 && clDistY < 0) ? -(clDistX*clDistY) : clDistX*clDistY;
                 
-            }
-            
-            // returns true if x,y fall into the cluster
-            public boolean isInside (int x, int y) {
-                distX = Math.abs(x - centerX);
-                distY = Math.abs(y - centerY);
                 // consider it inside a square with dimension dim to either side
-                return !(distX>dim || distY>dim);
-            }
+                /*if (clDistX<clDim && clDistY<clDim) {
+                    return 0;
+                } else if (clDistX-initDim<clDim && clDistY-initDim<clDim) { 
+                    // if new cluster would intersect the current one return shared area as measure for closeness
+                    return clDistX*clDistX + clDistY*clDistY;
+                }                
+                return -1;*/
+            }        
+            
+            // get methods
+            public float getCenterX() {return this.clCenterX;}
+            public float getCenterY() {return this.clCenterY;}
+            public float getDim() {return this.clDim;}
+            public float getInitDim() {return this.initDim;}
+            public double getTTC() {return this.clTTC;}
+            public double getActivity() {return this.clCountActivity;}
         }
     }
 
