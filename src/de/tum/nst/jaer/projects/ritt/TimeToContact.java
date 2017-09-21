@@ -673,13 +673,13 @@ public class TimeToContact extends EventFilter2D implements FrameAnnotater {
                 checkBlend(gl);
                 gl.glPushMatrix();
                 DrawGL.drawBox(gl, cl.getCenterX(), cl.getCenterY(), cl.getDim() * 2, cl.getDim() * 2, 0);
-                gl.glRasterPos2i(2, 10);
+                gl.glRasterPos2i(-5, 0);
                 chip.getCanvas().getGlut().glutBitmapString(GLUT.BITMAP_HELVETICA_18,
                         String.format("activity=%.2f", cl.clCountActivity));
-                gl.glRasterPos2i(2, 30);
+                gl.glRasterPos2i(-5, 5);
                 chip.getCanvas().getGlut().glutBitmapString(GLUT.BITMAP_HELVETICA_18,
                         String.format("dimension=%.2f", 2*cl.clDim));
-                gl.glRasterPos2i(2, 50);
+                gl.glRasterPos2i(-5, 10);
                 chip.getCanvas().getGlut().glutBitmapString(GLUT.BITMAP_HELVETICA_18,
                         String.format("ttc=%.2f", cl.clTTC));
                 gl.glPopMatrix();
@@ -696,7 +696,7 @@ public class TimeToContact extends EventFilter2D implements FrameAnnotater {
             // variable dimensions (to both sides of center) of cluster (for now quadratic dimensions)
             private float clDim; //dimX, dimY; //vs radius?
             // initial dimension of cluster 
-            private final float initDim = 30;           
+            private final float initDim = 15;          //30  
             // ttc estimate [s]
             private double clTTC;
             // distance of intersection of clusters
