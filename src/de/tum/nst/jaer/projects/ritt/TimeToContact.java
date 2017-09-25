@@ -93,16 +93,24 @@ public class TimeToContact extends EventFilter2D implements FrameAnnotater {
     private double mProbMax;
     // coordinates of maximum probability: location of FOE
     private int foeX, foeY;
+    // coordinates of current ground truth FOE
+    private float gtFoeX, gtFoeY;
     // time constant [microsec] for probability decay of FOE position
     private float tProb = getFloat("tProb", 1000f);
     // class that handles logging of obtained FOE
     private TobiLogger foeEstimationLogger = null;
+    // timestamp of last logging: to avoid logging in the loop
+    private int tsLoggedLast;
+    // turn on or off confidence measure
+    private boolean useConfidence = getBoolean("useConfidence", true);
 
     //  ______filtering incoming events
     // radius of evaluated pixels around current foe for probability update
     private int updateR = getInt("updateR", 50);
     // turn diverging field around center filter on/off
     private boolean centralFilter = getBoolean("centralFilter", true);
+    // counters for diverging flow vectors and total flow vectors
+    private int countTotalEvents, countTotalFlow, countNonDivergingFlow;
     // valid flow vector angle in degrees, +- vector to center from current pixel
     private float validAngle = getFloat("validAngle", (float) (120) );// * Math.PI / 180.0) );    
     // center coordinates of current sensor
@@ -113,7 +121,7 @@ public class TimeToContact extends EventFilter2D implements FrameAnnotater {
     private boolean importedGTfromFile = false;
     // ground truth values:
     private Vector<Double> gtTime;
-    private Vector<Float> gtFoeX, gtFoeY;
+    private Vector<Float> vecGtFoeX, vecGtFoeY;
 
     //_______________Variables handling optical flow estimation_________________
     private EventPacket flowPacket;
@@ -133,7 +141,7 @@ public class TimeToContact extends EventFilter2D implements FrameAnnotater {
         super(chip);
 
         // configure enclosed filter that creates optical flow events
-        flowFilter = new LocalPlanesFlow(chip);//new LucasKanadeFlow(chip); //new LocalPlanesFlow(chip);// TODO: make adaptable to other optical flow algos
+        flowFilter = new LucasKanadeFlow(chip); //new LocalPlanesFlow(chip);//new LocalPlanesFlow(chip);// TODO: make adaptable to other optical flow algos
         flowFilter.setDisplayRawInput(false); // to pass flow events not raw in        
         setEnclosedFilter(flowFilter);
 
@@ -149,8 +157,9 @@ public class TimeToContact extends EventFilter2D implements FrameAnnotater {
         setPropertyTooltip("Time to Contact", "alphaTTC", "averaging ttc threshold for per event contribution");
         setPropertyTooltip("Focus of Expansion", "tProb", "time constant [microsec]"
                 + " for probability decay of FOE position");
+        setPropertyTooltip("Focus of Expansion", "useConfidence", "use confidence measure to improve estimate");        
         setPropertyTooltip("Focus of Expansion", "updateR", "radius [pixels] around current FOE where probability is updated");        
-        setPropertyTooltip("Focus of Expansion", "centralFilter", "turn filter for diverging field around center on/off");
+        setPropertyTooltip("Focus of Expansion", "centralFilter", "turn on filter to count events not diverging from FOE");
         setPropertyTooltip("Focus of Expansion", "validAngle", "valid angle for central filter. flow events with angle between"
                 + " distance to center and flow direction greater than validAngle are discarded");
         setPropertyTooltip("Focus of Expansion", "displayFOE", "shows the estimated focus of expansion (FOE)");
@@ -164,6 +173,7 @@ public class TimeToContact extends EventFilter2D implements FrameAnnotater {
             return in; // do this check to avoid always running filter
         }
         if (enclosedFilter != null && enclosedFilter.isFilterEnabled()) {
+            countTotalEvents += in.size;
             flowPacket = enclosedFilter.filterPacket(in); // you can enclose a filter in a filter
         }
 
@@ -197,15 +207,20 @@ public class TimeToContact extends EventFilter2D implements FrameAnnotater {
             ts = ein.timestamp;
             type = ein.type;
             vx = ein.velocity.x;
-            vy = ein.velocity.y;            
+            vy = ein.velocity.y;
 
+            countTotalFlow++;            
+            
             int distXcenter = x - centerX;
             int distYcenter = y - centerY;
-            if ( false && centralFilter && (distXcenter*distXcenter + distYcenter*distYcenter)>updateR*updateR 
-                    && getRelAngle(distXcenter, distYcenter, vx, vy) > validAngle*Math.PI/180) {
-                ein.setFilteredOut(true);
-                filteredOutCentral++;
-                continue;
+            
+            if (importedGTfromFile) {
+                int currentGTIndex = binarySearch(ts * 1e-6);
+                gtFoeX = vecGtFoeX.get(currentGTIndex);
+                gtFoeY = vecGtFoeY.get(currentGTIndex);
+                if ( centralFilter && getRelAngle(x-gtFoeX, y-gtFoeY, vx, vy) > Math.PI/2) {
+                    countNonDivergingFlow++;
+                }
             }
 
             // FOE calculation (cf. Clady 2014)
@@ -230,7 +245,11 @@ public class TimeToContact extends EventFilter2D implements FrameAnnotater {
                 for (iy = lby; iy < uby; ++iy) {
                     // check if current pixel is on the negative semi half plane
                     if ((x - ix) * vx + (y - iy) * vy > 0) {
-                        mProb[ix][iy] += 1;
+                        if (useConfidence) {
+                            mProb[ix][iy] += ein.confidence;
+                        } else {
+                            mProb[ix][iy] += 1;
+                        }
                         mTime[ix][iy] = ts;
                     } else {
                         mProb[ix][iy] = mProb[ix][iy] * Math.exp(-Math.abs(ts - mTime[ix][iy]) / tProb);
@@ -244,14 +263,15 @@ public class TimeToContact extends EventFilter2D implements FrameAnnotater {
                 }
             }
         
+            //TODO: ueberarbeiten... S.151
+            // manuelle cluster auswahl mit obstacle einbauen
             // TTC calculation (cf. Clady 2014)
             // for now, no obstacle detection, rather obstacle selection
             //obstX = chip.getCanvas().getRenderer().getXsel();
-            //obstY = chip.getCanvas().getRenderer().getYsel();
-            int currentGTIndex = binarySearch(ts * 1e-6);
+            //obstY = chip.getCanvas().getRenderer().getYsel();            
             
-            distPx = x - Math.round( gtFoeX.get(currentGTIndex) );//foeX;
-            distPy = y - Math.round(gtFoeY.get(currentGTIndex));//foeY;
+            distPx = x - Math.round( gtFoeX );//foeX;
+            distPy = y - Math.round( gtFoeY );//foeY;
             if (threshDist*threshDist > (distPx * distPx + distPy * distPy) //only include events in circle of threshDist pixels around the foe
                     && (distPx * distPx + distPy * distPy) > 100 //do not include events too close to the foe
                     && threshVel < Math.sqrt(vx * vx + vy * vy) //only include flow events with sufficiently large flow velocity
@@ -280,7 +300,7 @@ public class TimeToContact extends EventFilter2D implements FrameAnnotater {
 
         }// end while(i.hasNext())               
 
-        log.info("Contributing ttc est: " + tempCountTtcEstimates + " overall ttc est: " + ttc + "per packet ttc: " + tempPackageAvgTTC);
+        //log.info("Contributing ttc est: " + tempCountTtcEstimates + " overall ttc est: " + ttc + "per packet ttc: " + tempPackageAvgTTC);
         
         // if logging is turned on, then foe estimation results are logged to file after every packet
         if (foeEstimationLogger != null && foeEstimationLogger.isEnabled()) {
@@ -299,15 +319,27 @@ public class TimeToContact extends EventFilter2D implements FrameAnnotater {
     /**
      * logs relevant FOE information to file
      */
-    private void logFoeData() {
+    private synchronized void logFoeData() {
         String s;
         if (importedGTfromFile) {
-            int currentGTIndex = binarySearch(ts * 1e-6);
-            s = String.format("%d %d %d %g %g %g %g", ts, foeX, foeY, gtFoeX.get(currentGTIndex), gtFoeY.get(currentGTIndex), mProb[foeX][foeY], ttc);
+            if (ts>tsLoggedLast){
+                tsLoggedLast = ts;
+                int currentGTIndex = binarySearch(ts * 1e-6);
+                s = String.format("%d %d %d %g %g %g %g %d %d %d", ts, foeX, foeY, vecGtFoeX.get(currentGTIndex), 
+                    vecGtFoeY.get(currentGTIndex), mProb[foeX][foeY], ttc, countTotalEvents, countTotalFlow, countNonDivergingFlow);
+                foeEstimationLogger.log(s);
+            } else {
+                //doStopLoggingFOE();
+            }
         } else {
-            s = String.format("%d %d %d %g %g", ts, foeX, foeY, mProb[foeX][foeY], ttc);
+            if (ts>tsLoggedLast){
+                tsLoggedLast = ts;
+                s = String.format("%d %d %d %g %g", ts, foeX, foeY, mProb[foeX][foeY], ttc);
+                foeEstimationLogger.log(s);
+            } else {
+                //doStopLoggingFOE();
+            }
         }
-        foeEstimationLogger.log(s);
     }
 
     /**
@@ -334,6 +366,11 @@ public class TimeToContact extends EventFilter2D implements FrameAnnotater {
         foeY = centerY;
         countInitTTC = 0;
         clusters.reset();
+        tsLoggedLast = 0; 
+        countTotalEvents = 0;
+        countTotalFlow = 0;
+        countNonDivergingFlow = 0;
+        
     }
 
     /**
@@ -354,8 +391,8 @@ public class TimeToContact extends EventFilter2D implements FrameAnnotater {
         chooser.setMultiSelectionEnabled(false);
 
         gtTime = new Vector<Double>();
-        gtFoeX = new Vector<Float>();
-        gtFoeY = new Vector<Float>();
+        vecGtFoeX = new Vector<Float>();
+        vecGtFoeY = new Vector<Float>();
         BufferedReader reader = null;
         File file = null;
         if (chooser.showOpenDialog(chip.getAeViewer().getFilterFrame()) == JFileChooser.APPROVE_OPTION) {
@@ -373,8 +410,8 @@ public class TimeToContact extends EventFilter2D implements FrameAnnotater {
                         continue;
                     }
                     gtTime.add(Double.parseDouble(columns[0]));
-                    gtFoeX.add((float) Double.parseDouble(columns[22]));
-                    gtFoeY.add((float) Double.parseDouble(columns[23]));
+                    vecGtFoeX.add((float) Double.parseDouble(columns[22]));
+                    vecGtFoeY.add((float) Double.parseDouble(columns[23]));
                 }
                 importedGTfromFile = true;
             } catch (FileNotFoundException e) {
@@ -396,8 +433,8 @@ public class TimeToContact extends EventFilter2D implements FrameAnnotater {
     void resetGroundTruth() {
         importedGTfromFile = false;
         gtTime = null;
-        gtFoeX = null;
-        gtFoeY = null;
+        vecGtFoeX = null;
+        vecGtFoeY = null;
     }
 
     synchronized public void doResetGroundTruth() {
@@ -423,7 +460,7 @@ public class TimeToContact extends EventFilter2D implements FrameAnnotater {
             foeEstimationLogger = new TobiLogger(file.getPath(), "Focus of expansion estimation results from optical flow");
             foeEstimationLogger.setNanotimeEnabled(false);
             if (importedGTfromFile) {
-                foeEstimationLogger.setHeaderLine("system_time(ms) timestamp(us) foeX foeY foeXgt foeYgt winningProb ttc");
+                foeEstimationLogger.setHeaderLine("system_time(ms) timestamp(us) foeX foeY foeXgt foeYgt winningProb ttc eventsTotal eventsFlow flowValid");
             } else {
                 foeEstimationLogger.setHeaderLine("system_time(ms) timestamp(us) foeX foeY winningProb ttc");
             }
@@ -448,6 +485,15 @@ public class TimeToContact extends EventFilter2D implements FrameAnnotater {
     public void setUpdateR(final int updateR_) {
         this.updateR = updateR_;
         putInt("updateR", updateR_);
+    }
+    
+    public boolean isUseConfidence() {
+        return useConfidence;
+    }
+
+    public void setUseConfidence(boolean useConfidence_) {
+        this.useConfidence = useConfidence_;
+        putBoolean("useConfidence", useConfidence_);
     }
     
     public float getTProb() {
@@ -561,7 +607,7 @@ public class TimeToContact extends EventFilter2D implements FrameAnnotater {
             checkBlend(gl);
             gl.glPushMatrix();
             int currentGTIndex = binarySearch(ts * 1e-6);
-            DrawGL.drawBox(gl, gtFoeX.get(currentGTIndex), gtFoeY.get(currentGTIndex), 4, 4, (float) (45 * Math.PI / 180));
+            DrawGL.drawBox(gl, vecGtFoeX.get(currentGTIndex), vecGtFoeY.get(currentGTIndex), 4, 4, (float) (45 * Math.PI / 180));
             gl.glPopMatrix();
         }
         
