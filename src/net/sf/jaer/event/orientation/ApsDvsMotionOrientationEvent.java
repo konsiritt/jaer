@@ -15,6 +15,7 @@ import java.awt.geom.Point2D;
  */
 public class ApsDvsMotionOrientationEvent extends ApsDvsOrientationEvent implements MotionOrientationEventInterface {
 
+    public int confidence = 1;
     /**
      * the direction of motion, a quantized value indexing into Dir
      */

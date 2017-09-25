@@ -471,20 +471,24 @@ public class LucasKanadeFlow extends AbstractMotionFlow {
             if (lambda1 < thr || Float.isNaN(lambda1)) {
                 vx = 0;
                 vy = 0;
+                confidence = 0;
             } else if (lambda2 < thr) {
                 tmp2 = spatDerivNeighb[currPix][0] * spatDerivNeighb[currPix][0]
                         + spatDerivNeighb[currPix][1] * spatDerivNeighb[currPix][1];
                 if (tmp2 == 0) {
                     vx = 0;
                     vy = 0;
+                    confidence = 0;
                 } else {
                     vx = -spatDerivNeighb[currPix][0] * tempDerivNeighb[currPix] / tmp2;
                     vy = -spatDerivNeighb[currPix][1] * tempDerivNeighb[currPix] / tmp2;
+                    confidence = 1;
                 }
             } else {
                 vx = (sxy * syt - sy2 * sxt) / q;
                 vy = (sxy * sxt - sx2 * syt) / q;
-            }
+                confidence = (int) (lambda1/thr);
+            }            
             v = (float) Math.sqrt(vx * vx + vy * vy);
             // </editor-fold>
 

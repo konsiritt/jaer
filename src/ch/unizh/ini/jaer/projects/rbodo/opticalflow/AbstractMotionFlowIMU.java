@@ -60,6 +60,8 @@ abstract public class AbstractMotionFlowIMU extends EventFilter2D implements Obs
 
     // Observed motion flow.
     public static float vx, vy, v;
+    
+    public int confidence = 1;
 
     int numInputTypes;
 
@@ -983,6 +985,7 @@ abstract public class AbstractMotionFlowIMU extends EventFilter2D implements Obs
         eout.velocity.y = vy;
         eout.speed = v;
         eout.hasDirection = v != 0;
+        eout.confidence = confidence;
         if (v != 0) {
             countOut++;
         }

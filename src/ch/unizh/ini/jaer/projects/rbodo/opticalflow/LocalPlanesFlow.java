@@ -390,6 +390,7 @@ public class LocalPlanesFlow extends AbstractMotionFlow {
             }
         }
         v = (float) Math.sqrt(vx * vx + vy * vy);
+        confidence = (neighborhood == null) ? 1 : neighborhood.size();
     }
 
     // Prints the surface of active events in the neighborhood of a certain pixel.
