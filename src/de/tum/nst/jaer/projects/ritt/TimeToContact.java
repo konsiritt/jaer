@@ -101,6 +101,10 @@ public class TimeToContact extends EventFilter2D implements FrameAnnotater {
     private TobiLogger foeEstimationLogger = null;
     // timestamp of last logging: to avoid logging in the loop
     private int tsLoggedLast;
+    // start time for logging
+    private float logBeginTime = getFloat("logBeginTime", 0f);
+    // end time for logging
+    private float logEndTime = getFloat("logEndTime", 1f);
     // turn on or off confidence measure
     private boolean useConfidence = getBoolean("useConfidence", true);
 
@@ -141,7 +145,7 @@ public class TimeToContact extends EventFilter2D implements FrameAnnotater {
         super(chip);
 
         // configure enclosed filter that creates optical flow events
-        flowFilter = new LucasKanadeFlow(chip); //new LocalPlanesFlow(chip);//new LocalPlanesFlow(chip);// TODO: make adaptable to other optical flow algos
+        flowFilter = new LocalPlanesFlow(chip);//new LucasKanadeFlow(chip); //new LocalPlanesFlow(chip);// TODO: make adaptable to other optical flow algos
         flowFilter.setDisplayRawInput(false); // to pass flow events not raw in        
         setEnclosedFilter(flowFilter);
 
@@ -165,6 +169,8 @@ public class TimeToContact extends EventFilter2D implements FrameAnnotater {
         setPropertyTooltip("Focus of Expansion", "displayFOE", "shows the estimated focus of expansion (FOE)");
         setPropertyTooltip("View", "displayRawInput", "shows the input events, instead of the motion types");
         setPropertyTooltip("View", "displayClusters", "shows the clusters of events that can correspond to an obstacle in the path");
+        setPropertyTooltip("Logging", "logBeginTime", "start time for logging [s]");        
+        setPropertyTooltip("Logging", "logEndTime", "end time for logging [s]");  
     }
 
     @Override
@@ -292,10 +298,10 @@ public class TimeToContact extends EventFilter2D implements FrameAnnotater {
                         tempPackageAvgTTC = (tempPackageAvgTTC * tempCountTtcEstimates + currTTC) / ++tempCountTtcEstimates;
                     }*/
                 } else {
-                    ein.setFilteredOut(true);
+                    //ein.setFilteredOut(true);
                 }
             } else {
-                ein.setFilteredOut(true);
+                //ein.setFilteredOut(true);
             }
 
         }// end while(i.hasNext())               
@@ -322,7 +328,7 @@ public class TimeToContact extends EventFilter2D implements FrameAnnotater {
     private synchronized void logFoeData() {
         String s;
         if (importedGTfromFile) {
-            if (ts>tsLoggedLast){
+            if (ts>tsLoggedLast && ts>logBeginTime*1e6 && ts < logEndTime*1e6){
                 tsLoggedLast = ts;
                 int currentGTIndex = binarySearch(ts * 1e-6);
                 s = String.format("%d %d %d %g %g %g %g %d %d %d", ts, foeX, foeY, vecGtFoeX.get(currentGTIndex), 
@@ -332,7 +338,7 @@ public class TimeToContact extends EventFilter2D implements FrameAnnotater {
                 //doStopLoggingFOE();
             }
         } else {
-            if (ts>tsLoggedLast){
+            if (ts>tsLoggedLast && ts>logBeginTime*1e6 && ts < logEndTime*1e6){
                 tsLoggedLast = ts;
                 s = String.format("%d %d %d %g %g", ts, foeX, foeY, mProb[foeX][foeY], ttc);
                 foeEstimationLogger.log(s);
@@ -503,6 +509,24 @@ public class TimeToContact extends EventFilter2D implements FrameAnnotater {
     public void setTProb(final float tProb_) {
         this.tProb = tProb_;
         putFloat("tProb", tProb_);
+    }
+    
+    public float getLogBeginTime() {
+        return this.logBeginTime;
+    }
+
+    public void setLogBeginTime(final float logBeginTime_) {
+        this.logBeginTime = logBeginTime_;
+        putFloat("logBeginTime", logBeginTime_);
+    }
+    
+    public float getLogEndTime() {
+        return this.logEndTime;
+    }
+
+    public void setLogEndTime(final float logEndTime_) {
+        this.logEndTime = logEndTime_;
+        putFloat("logEndTime", logEndTime_);
     }
     
     public int getThreshDist() {
