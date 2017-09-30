@@ -145,7 +145,7 @@ public class TimeToContact extends EventFilter2D implements FrameAnnotater {
         super(chip);
 
         // configure enclosed filter that creates optical flow events
-        flowFilter = new LocalPlanesFlow(chip);//new LucasKanadeFlow(chip); //new LocalPlanesFlow(chip);// TODO: make adaptable to other optical flow algos
+        flowFilter = new LucasKanadeFlow(chip); //new LocalPlanesFlow(chip);// TODO: make adaptable to other optical flow algos
         flowFilter.setDisplayRawInput(false); // to pass flow events not raw in        
         setEnclosedFilter(flowFilter);
 
