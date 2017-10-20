@@ -77,11 +77,17 @@ public class TimeToContact extends EventFilter2D implements FrameAnnotater {
     // overall lowest ttc estimate in [s]
     private double ttc = 0;
     // update weight for EMA 
-    private float alphaTTC = getFloat("alphaTTC",0.033f);;
+    private float alphaTTC = getFloat("alphaTTC",0.033f);
     // amount of initial updates
     private int countInitTTC;
     // threshold for initialization of ttc estimate
     private int threshInitTTC = 10; 
+    // horizontal dimension from FOE to the sides for region B, from which obstacles are expected 
+    private float roiR = getFloat("roiR",25.0f);
+    // slope for the trapezoid region B, downwards from FOE
+    private float roiSlope = getFloat("roiSlope",2.0f);
+    // only compute ttc based on y-direction estimate
+    private boolean useYsly = getBoolean("useYsly", false);
     // clustering of possible obstacles handled by object
     private clusterDetector clusters = new clusterDetector(10);
 
@@ -107,6 +113,8 @@ public class TimeToContact extends EventFilter2D implements FrameAnnotater {
     private float logEndTime = getFloat("logEndTime", 1f);
     // turn on or off confidence measure
     private boolean useConfidence = getBoolean("useConfidence", true);
+    // exclude events originating from the street
+    private boolean excludeStreetFoe = getBoolean("excludeStreetFoe", false);
 
     //  ______filtering incoming events
     // radius of evaluated pixels around current foe for probability update
@@ -145,7 +153,7 @@ public class TimeToContact extends EventFilter2D implements FrameAnnotater {
         super(chip);
 
         // configure enclosed filter that creates optical flow events
-        flowFilter = new LucasKanadeFlow(chip); //new LocalPlanesFlow(chip);// TODO: make adaptable to other optical flow algos
+        flowFilter = new LocalPlanesFlow(chip);//new LucasKanadeFlow(chip); // TODO: make adaptable to other optical flow algos
         flowFilter.setDisplayRawInput(false); // to pass flow events not raw in        
         setEnclosedFilter(flowFilter);
 
@@ -159,6 +167,9 @@ public class TimeToContact extends EventFilter2D implements FrameAnnotater {
         setPropertyTooltip("Time to Contact", "threshVel", "velocity threshold for events being considered in ttc estimation (in pixels/s)");
         setPropertyTooltip("Time to Contact", "threshTTC", "ttc threshold for events being considered in ttc estimation (s)");
         setPropertyTooltip("Time to Contact", "alphaTTC", "averaging ttc threshold for per event contribution");
+        setPropertyTooltip("Time to Contact", "roiR", " horizontal dimension from FOE to the sides for region B, from which obstacles are expected");
+        setPropertyTooltip("Time to Contact", "roiSlope", "downward slope for the trapezoid region B, higher value includes more to the sides");
+        setPropertyTooltip("Time to Contact", "useYsly", "compute the TTC only based on the estimate (flow and direction) in y direction");
         setPropertyTooltip("Focus of Expansion", "tProb", "time constant [microsec]"
                 + " for probability decay of FOE position");
         setPropertyTooltip("Focus of Expansion", "useConfidence", "use confidence measure to improve estimate");        
@@ -167,6 +178,7 @@ public class TimeToContact extends EventFilter2D implements FrameAnnotater {
         setPropertyTooltip("Focus of Expansion", "validAngle", "valid angle for central filter. flow events with angle between"
                 + " distance to center and flow direction greater than validAngle are discarded");
         setPropertyTooltip("Focus of Expansion", "displayFOE", "shows the estimated focus of expansion (FOE)");
+        setPropertyTooltip("Focus of Expansion", "excludeStreetFoe", "excludes events originating from the street (region B) for the FOE estimation (might be noisy)");
         setPropertyTooltip("View", "displayRawInput", "shows the input events, instead of the motion types");
         setPropertyTooltip("View", "displayClusters", "shows the clusters of events that can correspond to an obstacle in the path");
         setPropertyTooltip("Logging", "logBeginTime", "start time for logging [s]");        
@@ -227,78 +239,88 @@ public class TimeToContact extends EventFilter2D implements FrameAnnotater {
                 if ( centralFilter && getRelAngle(x-gtFoeX, y-gtFoeY, vx, vy) > Math.PI/2) {
                     countNonDivergingFlow++;
                 }
-            }
+            }            
+            
+            // potentially exclude events originating from the street (region B) as the events might be noisy
+            distPx = x - Math.round( gtFoeX );//foeX;
+            distPy = y - Math.round( gtFoeY );//foeY;
+            if ( excludeStreetFoe && distPy < 0 && Math.abs(distPx) < roiR - roiSlope*distPy ) {
+                // event on the street not included in estimate
+            } else {
 
-            // FOE calculation (cf. Clady 2014)
-            // ensure boundaries of pixels validated do not violate pixel dimensions            
-            lbx = centerX - updateR;
-            ubx = centerX + updateR;
-            if (lbx < 0) {
-                lbx = 0;
-            }
-            if (ubx > sizex) {
-                ubx = sizex;
-            }
-            for (ix = lbx; ix < ubx; ++ix) {
-                lby = (int) Math.round(centerY - Math.sqrt(updateR * updateR - (ix - centerX) * (ix - centerX)));
-                uby = (int) Math.round(centerY + Math.sqrt(updateR * updateR - (ix - centerX) * (ix - centerX)));
-                if (lby < 0) {
-                    lby = 0;
+                // FOE calculation (cf. Clady 2014)
+                // ensure boundaries of pixels validated do not violate pixel dimensions            
+                lbx = centerX - updateR;
+                ubx = centerX + updateR;
+                if (lbx < 0) {
+                    lbx = 0;
                 }
-                if (uby > sizey) {
-                    uby = sizey;
+                if (ubx > sizex) {
+                    ubx = sizex;
                 }
-                for (iy = lby; iy < uby; ++iy) {
-                    // check if current pixel is on the negative semi half plane
-                    if ((x - ix) * vx + (y - iy) * vy > 0) {
-                        if (useConfidence) {
-                            mProb[ix][iy] += ein.confidence;
+                for (ix = lbx; ix < ubx; ++ix) {
+                    lby = (int) Math.round(centerY - Math.sqrt(updateR * updateR - (ix - centerX) * (ix - centerX)));
+                    uby = (int) Math.round(centerY + Math.sqrt(updateR * updateR - (ix - centerX) * (ix - centerX)));
+                    if (lby < 0) {
+                        lby = 0;
+                    }
+                    if (uby > sizey) {
+                        uby = sizey;
+                    }
+                    for (iy = lby; iy < uby; ++iy) {
+                        // check if current pixel is on the negative semi half plane
+                        if ((x - ix) * vx + (y - iy) * vy > 0) {
+                            if (useConfidence) {
+                                mProb[ix][iy] += ein.confidence;
+                            } else {
+                                mProb[ix][iy] += 1;
+                            }
+                            mTime[ix][iy] = ts;
                         } else {
-                            mProb[ix][iy] += 1;
+                            mProb[ix][iy] = mProb[ix][iy] * Math.exp(-Math.abs(ts - mTime[ix][iy]) / tProb);
                         }
-                        mTime[ix][iy] = ts;
-                    } else {
-                        mProb[ix][iy] = mProb[ix][iy] * Math.exp(-Math.abs(ts - mTime[ix][iy]) / tProb);
-                    }
 
-                    if (mProb[ix][iy] > mProbMax) {
-                        mProbMax = mProb[ix][iy];
-                        foeX = ix;
-                        foeY = iy;
+                        if (mProb[ix][iy] > mProbMax) {
+                            mProbMax = mProb[ix][iy];
+                            foeX = ix;
+                            foeY = iy;
+                        }
                     }
                 }
             }
-        
+
             //TODO: ueberarbeiten... S.151
             // manuelle cluster auswahl mit obstacle einbauen
             // TTC calculation (cf. Clady 2014)
-            // for now, no obstacle detection, rather obstacle selection
-            //obstX = chip.getCanvas().getRenderer().getXsel();
-            //obstY = chip.getCanvas().getRenderer().getYsel();            
+            // for now, no obstacle detection, rather obstacle selection                       
             
-            distPx = x - Math.round( gtFoeX );//foeX;
-            distPy = y - Math.round( gtFoeY );//foeY;
-            if (threshDist*threshDist > (distPx * distPx + distPy * distPy) //only include events in circle of threshDist pixels around the foe
-                    && (distPx * distPx + distPy * distPy) > 100 //do not include events too close to the foe
-                    && threshVel < Math.sqrt(vx * vx + vy * vy) //only include flow events with sufficiently large flow velocity
-                    && getRelAngle(distPx, distPy, vx, vy) < validAngle * Math.PI / 180 //) //only include flow events diverging from foe
-                    && vy < 0 && distPy < 0 ) // hack: only include flow events below the foe
+            //distPx = x - Math.round( gtFoeX );//foeX;
+            //distPy = y - Math.round( gtFoeY );//foeY;
+            if ( distPy < 0 && Math.abs(distPx) < roiR - roiSlope*distPy // only events from region B (i.e. the road, where obstacles are expected
+                    && (distPx * distPx + distPy * distPy) > 25 //do not include events too close to the foe
+                    && getRelAngle(distPx, distPy, vx, vy) < validAngle * Math.PI / 180 //only include flow events diverging from foe
+                    && threshVel < Math.sqrt(vx * vx + vy * vy) //only include flow events with sufficiently large flow velocity -> avoids noisy estimates
+                    ) // && vy < 0 && distPy < 0 ) // hack: only include flow events below the foe
             {
-                currTTC = 0.5 * (distPx / vx + distPy / vy);
-                if (currTTC < threshTTC && currTTC > 0) {
-                    
-                    clusters.assignCluster(x, y, currTTC, ts);
-                    
-                    /*if (ttc == 0) { //initialize
-                        ttc = currTTC;
-                    } else if (countInitTTC < threshInitTTC) { //initialize for threshInitTTC estimates
-                        ttc = (countInitTTC * ttc + currTTC) / ++countInitTTC;
-                    } else {
-                        ttc += alphaTTC * (currTTC - ttc);
-                        tempPackageAvgTTC = (tempPackageAvgTTC * tempCountTtcEstimates + currTTC) / ++tempCountTtcEstimates;
-                    }*/
+                // only use y estimate for ttc estimation
+                if (useYsly) {
+                    if (vx < 10 * vy) //use only estimates strongly in y direction
+                    {
+                        // use other ttc formula 
+                        currTTC = distPx*vx /(vx*vx+vy*vy) + distPy*vy / (vx*vx+vy*vy);
+                        if (currTTC < threshTTC && currTTC > 0) {
+                            clusters.assignCluster(x, y, currTTC, ts);
+                        } else {
+                            //ein.setFilteredOut(true);
+                        }
+                    }
                 } else {
-                    //ein.setFilteredOut(true);
+                    currTTC = 0.5 * (distPx / vx + distPy / vy);
+                    if (currTTC < threshTTC && currTTC > 0) {
+                        clusters.assignCluster(x, y, currTTC, ts);
+                    } else {
+                        //ein.setFilteredOut(true);
+                    }
                 }
             } else {
                 //ein.setFilteredOut(true);
@@ -306,19 +328,10 @@ public class TimeToContact extends EventFilter2D implements FrameAnnotater {
 
         }// end while(i.hasNext())               
 
-        //log.info("Contributing ttc est: " + tempCountTtcEstimates + " overall ttc est: " + ttc + "per packet ttc: " + tempPackageAvgTTC);
-        
         // if logging is turned on, then foe estimation results are logged to file after every packet
         if (foeEstimationLogger != null && foeEstimationLogger.isEnabled()) {
             logFoeData();
         }
-        
-        //log.info("current foe winner "+foeX+", "+foeY+" with probability = "
-        //+mProb[foeX][foeY]+ " time since last update = " +(ts - mTime[foeX][foeY]));
-        //int currentGTIndex = binarySearch(ts*1e-6);
-        //System.out.println("speed = " + filteredOutSpeed + " central = " + filteredOutCentral + " foeX = " + foeX + " foeY = " + foeY
-        //+ " corresponding gt foeX=" + gtFoeX.get(currentGTIndex) + " foeY=" +gtFoeY.get(currentGTIndex) + " at time ts=" + ts
-        //+ " with index " + currentGTIndex);
         return isDisplayRawInput() ? in : flowPacket;
     }
     
@@ -327,6 +340,12 @@ public class TimeToContact extends EventFilter2D implements FrameAnnotater {
      */
     private synchronized void logFoeData() {
         String s;
+        obstX = chip.getCanvas().getRenderer().getXsel();
+        obstY = chip.getCanvas().getRenderer().getYsel(); 
+        // if an obstacle was hand selected, obtain the corresponding ttc estimate of the cluster
+        if ((chip.getCanvas().getRenderer() != null) && (obstX != -1) && (obstY != -1)) {
+            ttc = clusters.selectCluster(obstX, obstY);
+        }
         if (importedGTfromFile) {
             if (ts>tsLoggedLast && ts>logBeginTime*1e6 && ts < logEndTime*1e6){
                 tsLoggedLast = ts;
@@ -502,6 +521,15 @@ public class TimeToContact extends EventFilter2D implements FrameAnnotater {
         putBoolean("useConfidence", useConfidence_);
     }
     
+    public boolean isExcludeStreetFoe() {
+        return excludeStreetFoe;
+    }
+
+    public void setExcludeStreetFoe(boolean excludeStreetFoe_) {
+        this.excludeStreetFoe = excludeStreetFoe_;
+        putBoolean("excludeStreetFoe", excludeStreetFoe_);
+    }
+    
     public float getTProb() {
         return this.tProb;
     }
@@ -563,6 +591,33 @@ public class TimeToContact extends EventFilter2D implements FrameAnnotater {
     public void setAlphaTTC(final float alphaTTC_) {
         this.alphaTTC = alphaTTC_;
         putFloat("alphaTTC", alphaTTC_);
+    }
+
+    public float getRoiSlope() {
+        return this.roiSlope;
+    }
+
+    public void setRoiSlope(final float roiSlope_) {
+        this.roiSlope = roiSlope_;
+        putFloat("roiSlope", roiSlope_);
+    }
+    
+    public float getRoiR() {
+        return this.roiR;
+    }
+
+    public void setRoiR(final float roiR_) {
+        this.roiR = roiR_;
+        putFloat("roiR", roiR_);
+    }
+    
+    public boolean isUseYsly() {
+        return useYsly;
+    }
+
+    public void setUseYsly(boolean useYsly_) {
+        this.useYsly = useYsly_;
+        putBoolean("useYsly", useYsly_);
     }
     
     public boolean isCentralFilter() {
@@ -734,6 +789,36 @@ public class TimeToContact extends EventFilter2D implements FrameAnnotater {
                 clusterList.add(new cluster(xNew, yNew, ttcNew));
             }            
         }
+        
+        // interface: selects the cluster corresponding to the selected pixel and returns its ttc estimate
+        public synchronized double selectCluster(int xNew, int yNew){
+            // event has (not) been assigned
+            boolean clAssigned = false;
+            // greatest shared area
+            double areaBest = 0;
+            // id of cluster with greatest shared area
+            int idBestCluster = -1;
+            
+            int i = 0;            
+            for (Iterator<cluster> iterator = clusterList.iterator(); iterator.hasNext(); i++){
+                cluster cl = iterator.next();   
+                if (!clAssigned) {
+                    double temp = cl.isInside(xNew, yNew);
+                    // if it is inside the cluster
+                    if (temp >= cl.getInitDim()*cl.getInitDim()) {                        
+                        clAssigned = true;
+                        return cl.getTTC();
+                    }else if (temp > areaBest) {
+                        areaBest = temp;
+                        idBestCluster = i;
+                    }
+                }                                
+            }            
+            if (idBestCluster > 0) {
+                return clusterList.get(idBestCluster).getTTC();
+            }
+            return 0;
+        }
 
         public void draw(GL2 gl) {
             if (!isFilterEnabled()) {
@@ -776,7 +861,7 @@ public class TimeToContact extends EventFilter2D implements FrameAnnotater {
             // counter for activity of cluster
             private double clCountActivity;
             // time constant for counter activity degradation 
-            private final float clActUpdate = 100000.0f;
+            private final float clActUpdate = 1000000.0f;
             
             public cluster(){                
             }
