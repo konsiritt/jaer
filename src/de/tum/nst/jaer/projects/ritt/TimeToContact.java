@@ -86,6 +86,8 @@ public class TimeToContact extends EventFilter2D implements FrameAnnotater {
     private float roiSlope = getFloat("roiSlope",2.0f);
     // only compute ttc based on y-direction estimate
     private boolean useYsly = getBoolean("useYsly", false);
+    // amount of events considered for moving average to obtain overall ttc est
+    private int amountAverage = getInt("amountAverage", 1000);
     // clustering of possible obstacles handled by object
     private clusterDetector clusters = new clusterDetector(10);
 
@@ -168,6 +170,7 @@ public class TimeToContact extends EventFilter2D implements FrameAnnotater {
         setPropertyTooltip("Time to Contact", "roiR", " horizontal dimension from FOE to the sides for region B, from which obstacles are expected");
         setPropertyTooltip("Time to Contact", "roiSlope", "downward slope for the trapezoid region B, higher value includes more to the sides");
         setPropertyTooltip("Time to Contact", "useYsly", "compute the TTC only based on the estimate (flow and direction) in y direction");
+        setPropertyTooltip("Time to Contact", "amountAverage", "amount of events considered for moving average to obtain overall ttc estimate");
         setPropertyTooltip("Focus of Expansion", "tProb", "time constant [microsec]"
                 + " for probability decay of FOE position");
         setPropertyTooltip("Focus of Expansion", "useConfidence", "use confidence measure to improve estimate");        
@@ -306,14 +309,14 @@ public class TimeToContact extends EventFilter2D implements FrameAnnotater {
             //distPx = x - Math.round( gtFoeX );//foeX;
             //distPy = y - Math.round( gtFoeY );//foeY;
             if ( distPy < 0 && Math.abs(distPx) < roiR - roiSlope*distPy // only events from region B (i.e. the road, where obstacles are expected
-                    && (distPx * distPx + distPy * distPy) > 25 //do not include events too close to the foe
+                    && (distPx * distPx + distPy * distPy) > 10 //do not include events too close to the foe
                     && getRelAngle(distPx, distPy, vx, vy) < validAngle * Math.PI / 180 //only include flow events diverging from foe
                     && threshVel < Math.sqrt(vx * vx + vy * vy) //only include flow events with sufficiently large flow velocity -> avoids noisy estimates
                     ) // && vy < 0 && distPy < 0 ) // hack: only include flow events below the foe
             {
                 // only use y estimate for ttc estimation
                 if (useYsly) {
-                    if (vx < 20 * vy) //use only estimates strongly in y direction
+                    if (Math.abs(vx) < 20 * Math.abs(vy)) //use only estimates strongly in y direction
                     {
                         // use other ttc formula 
                         currTTC = distPx*vx /(vx*vx+vy*vy) + distPy*vy / (vx*vx+vy*vy);
@@ -621,6 +624,15 @@ public class TimeToContact extends EventFilter2D implements FrameAnnotater {
         putBoolean("useYsly", useYsly_);
     }
     
+    public int getAmountAverage() {
+        return this.amountAverage;
+    }
+
+    public void setAmountAverage(final int amountAverage_) {
+        this.amountAverage = amountAverage_;
+        putInt("amountAverage", amountAverage_);
+    }
+    
     public boolean isCentralFilter() {
         return centralFilter;
     }
@@ -865,6 +877,12 @@ public class TimeToContact extends EventFilter2D implements FrameAnnotater {
             private final float initDim = 15;          //30  
             // ttc estimate [s]
             private double clTTC;
+            // array with the latest ttc estimates to build average from it
+            private double [] avgTTC;
+            // index pointing to current entry for average value memory
+            private int indexAvg;
+            // flag for fully initialized average
+            private boolean avgInitialized = false;
             // distance of intersection of clusters
             private float clDistX, clDistY;
             // timestamp of last update [microsec]
@@ -878,26 +896,48 @@ public class TimeToContact extends EventFilter2D implements FrameAnnotater {
             }
             
             public cluster(int x, int y, double ttcNew){
+                avgTTC = new double[amountAverage];
                 clCenterX = x;
                 clCenterY = y;
                 clTTC = ttcNew;
+                avgTTC[indexAvg] = ttcNew;
+                indexAvg++;
+                if (indexAvg==amountAverage) {
+                    indexAvg = 0;
+                }
                 clDim = initDim;
                 ++clCountActivity;
             }            
             
             // updates the per cluster values according to inlier ttc event
             public synchronized void updateInCluster (int xNew, int yNew, double ttcNew, int tsNew) {
-                clTTC += (ttcNew-clTTC)/++clCountActivity; //+= alphaTTC * (ttcNew - clTTC);              
+                //clTTC += (ttcNew-clTTC)/++clCountActivity; //+= alphaTTC * (ttcNew - clTTC);              
+                clCountActivity++;
                 clCenterX += (xNew-clCenterX)/clCountActivity;          
                 clCenterY += (yNew-clCenterY)/clCountActivity;
+                clTTC = (avgInitialized ) ? clTTC - (avgTTC[indexAvg]-ttcNew)/amountAverage : (clTTC*indexAvg+ttcNew)/(indexAvg+1);
+                avgTTC[indexAvg] = ttcNew;
+                indexAvg++;
+                if (indexAvg==amountAverage) {
+                    indexAvg = 0;
+                    avgInitialized = true;
+                }
                 clLastUpdate = tsNew;
             }
             
             // updates the per cluster values according to outlier ttc event
             public synchronized void updateOutCluster (int xNew, int yNew, double ttcNew, int tsNew) {
-                clTTC += (ttcNew-clTTC)/++clCountActivity;            
+                //clTTC += (ttcNew-clTTC)/++clCountActivity;    
+                ++clCountActivity;  
                 clCenterX += (xNew-clCenterX)/clCountActivity;          
                 clCenterY += (yNew-clCenterY)/clCountActivity;
+                clTTC = (avgInitialized ) ? clTTC - (avgTTC[indexAvg]-ttcNew)/amountAverage : (clTTC*indexAvg+ttcNew)/(indexAvg+1);
+                avgTTC[indexAvg] = ttcNew;
+                indexAvg++;
+                if (indexAvg==amountAverage) {
+                    indexAvg = 0;
+                    avgInitialized = true;
+                }
                 clLastUpdate = tsNew;
                 clDim += 1/clCountActivity;
             }
