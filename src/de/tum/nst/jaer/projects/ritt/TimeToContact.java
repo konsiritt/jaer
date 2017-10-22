@@ -76,8 +76,6 @@ public class TimeToContact extends EventFilter2D implements FrameAnnotater {
     private double currTTC;
     // overall lowest ttc estimate in [s]
     private double ttc = 0;
-    // update weight for EMA 
-    private float alphaTTC = getFloat("alphaTTC",0.033f);
     // amount of initial updates
     private int countInitTTC;
     // threshold for initialization of ttc estimate
@@ -141,6 +139,7 @@ public class TimeToContact extends EventFilter2D implements FrameAnnotater {
 
     //____________________Variables for user handling___________________________
     private boolean displayFOE = getBoolean("displayFOE", true);
+    private boolean displayFlow = getBoolean("displayFlow", true);
     private boolean displayRawInput = getBoolean("displayRawInput", true);
     private boolean displayClusters = getBoolean("displayClusters", true);
 
@@ -166,7 +165,6 @@ public class TimeToContact extends EventFilter2D implements FrameAnnotater {
         setPropertyTooltip("Time to Contact", "threshDist", "distance threshold for events being considered in ttc estimation (in pixels)");
         setPropertyTooltip("Time to Contact", "threshVel", "velocity threshold for events being considered in ttc estimation (in pixels/s)");
         setPropertyTooltip("Time to Contact", "threshTTC", "ttc threshold for events being considered in ttc estimation (s)");
-        setPropertyTooltip("Time to Contact", "alphaTTC", "averaging ttc threshold for per event contribution");
         setPropertyTooltip("Time to Contact", "roiR", " horizontal dimension from FOE to the sides for region B, from which obstacles are expected");
         setPropertyTooltip("Time to Contact", "roiSlope", "downward slope for the trapezoid region B, higher value includes more to the sides");
         setPropertyTooltip("Time to Contact", "useYsly", "compute the TTC only based on the estimate (flow and direction) in y direction");
@@ -181,6 +179,7 @@ public class TimeToContact extends EventFilter2D implements FrameAnnotater {
         setPropertyTooltip("Focus of Expansion", "excludeStreetFoe", "excludes events originating from the street (region B) for the FOE estimation (might be noisy)");
         setPropertyTooltip("View", "displayRawInput", "shows the input events, instead of the motion types");
         setPropertyTooltip("View", "displayClusters", "shows the clusters of events that can correspond to an obstacle in the path");
+        setPropertyTooltip("View", "displayFlow", "shows the estimated optical flow at selected position");
         setPropertyTooltip("Logging", "logBeginTime", "start time for logging [s]");        
         setPropertyTooltip("Logging", "logEndTime", "end time for logging [s]");  
     }
@@ -228,6 +227,16 @@ public class TimeToContact extends EventFilter2D implements FrameAnnotater {
             vy = ein.velocity.y;
 
             countTotalFlow++;            
+
+            if (displayFlow ) {
+                double selX = chip.getCanvas().getRenderer().getXsel();
+                double selY = chip.getCanvas().getRenderer().getYsel();
+                if ( selX > 0 && selY > 0) {
+                    if (selX==x && selY==y) {
+                        log.info("vx = " + vx + "px/s; vy = " + vy + "px/s");
+                    }
+                }
+            }
             
             int distXcenter = x - centerX;
             int distYcenter = y - centerY;
@@ -304,7 +313,7 @@ public class TimeToContact extends EventFilter2D implements FrameAnnotater {
             {
                 // only use y estimate for ttc estimation
                 if (useYsly) {
-                    if (vx < 10 * vy) //use only estimates strongly in y direction
+                    if (vx < 20 * vy) //use only estimates strongly in y direction
                     {
                         // use other ttc formula 
                         currTTC = distPx*vx /(vx*vx+vy*vy) + distPy*vy / (vx*vx+vy*vy);
@@ -503,6 +512,7 @@ public class TimeToContact extends EventFilter2D implements FrameAnnotater {
         foeEstimationLogger = null;
     }
 
+    // <editor-fold defaultstate="collapsed" desc="get and set methods for user interface">
     public int getUpdateR() {
         return this.updateR;
     }
@@ -583,15 +593,6 @@ public class TimeToContact extends EventFilter2D implements FrameAnnotater {
         this.threshTTC = threshTTC_;
         putFloat("threshTTC", threshTTC_);
     }
-    
-    public float getAlphaTTC() {
-        return this.alphaTTC;
-    }
-
-    public void setAlphaTTC(final float alphaTTC_) {
-        this.alphaTTC = alphaTTC_;
-        putFloat("alphaTTC", alphaTTC_);
-    }
 
     public float getRoiSlope() {
         return this.roiSlope;
@@ -646,6 +647,15 @@ public class TimeToContact extends EventFilter2D implements FrameAnnotater {
         this.displayFOE = displayFOE_;
         putBoolean("displayFOE", displayFOE_);
     }
+    
+    public boolean isDisplayFlow() {
+        return displayFlow;
+    }
+
+    public void setDisplayFlow(boolean displayFlow_) {
+        this.displayFlow = displayFlow_;
+        putBoolean("displayFlow", displayFlow_);
+    }
 
     public boolean isDisplayRawInput() {
         return displayRawInput;
@@ -664,6 +674,7 @@ public class TimeToContact extends EventFilter2D implements FrameAnnotater {
         this.displayClusters = displayClusters_;
         putBoolean("displayClusters", displayClusters_);
     }
+    // </editor-fold>
 
     @Override
     public void annotate(GLAutoDrawable drawable) {
@@ -861,7 +872,7 @@ public class TimeToContact extends EventFilter2D implements FrameAnnotater {
             // counter for activity of cluster
             private double clCountActivity;
             // time constant for counter activity degradation 
-            private final float clActUpdate = 1000000.0f;
+            private final float clActUpdate = 500000.0f;
             
             public cluster(){                
             }
@@ -893,7 +904,7 @@ public class TimeToContact extends EventFilter2D implements FrameAnnotater {
             
             // updates current weight of the cluster
             public void updateWeight(int tsNew) {
-                clCountActivity = clCountActivity * Math.exp(-Math.abs(tsNew - clLastUpdate) / clActUpdate);
+                clCountActivity = clCountActivity * Math.exp(-Math.abs(tsNew - clLastUpdate) / tProb); //clActUpdate);
             }
             
             // returns overlapping area(px*px) as a measure of closeness
@@ -902,16 +913,7 @@ public class TimeToContact extends EventFilter2D implements FrameAnnotater {
                 clDistX = -Math.abs((float)x - clCenterX) + clDim + initDim;
                 clDistY = -Math.abs((float)y - clCenterY) + clDim + initDim;
 
-                return (clDistX < 0 && clDistY < 0) ? -(clDistX*clDistY) : clDistX*clDistY;
-                
-                // consider it inside a square with dimension dim to either side
-                /*if (clDistX<clDim && clDistY<clDim) {
-                    return 0;
-                } else if (clDistX-initDim<clDim && clDistY-initDim<clDim) { 
-                    // if new cluster would intersect the current one return shared area as measure for closeness
-                    return clDistX*clDistX + clDistY*clDistY;
-                }                
-                return -1;*/
+                return (clDistX < 0 && clDistY < 0) ? -(clDistX*clDistY) : clDistX*clDistY;               
             }        
             
             // get methods
