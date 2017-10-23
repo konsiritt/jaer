@@ -254,8 +254,8 @@ public class TimeToContact extends EventFilter2D implements FrameAnnotater {
             }            
             
             // potentially exclude events originating from the street (region B) as the events might be noisy
-            distPx = x - Math.round( gtFoeX );//foeX;
-            distPy = y - Math.round( gtFoeY );//foeY;
+            distPx = x - foeX;//Math.round( gtFoeX );//
+            distPy = y - foeY;//Math.round( gtFoeY );//
             if ( excludeStreetFoe && distPy < 0 && Math.abs(distPx) < roiR - roiSlope*distPy ) {
                 // event on the street not included in estimate
             } else {
@@ -304,15 +304,12 @@ public class TimeToContact extends EventFilter2D implements FrameAnnotater {
             //TODO: ueberarbeiten... S.151
             // manuelle cluster auswahl mit obstacle einbauen
             // TTC calculation (cf. Clady 2014)
-            // for now, no obstacle detection, rather obstacle selection                       
-            
-            //distPx = x - Math.round( gtFoeX );//foeX;
-            //distPy = y - Math.round( gtFoeY );//foeY;
+            // for now, no obstacle detection, rather obstacle selection                                   
             if ( distPy < 0 && Math.abs(distPx) < roiR - roiSlope*distPy // only events from region B (i.e. the road, where obstacles are expected
                     && (distPx * distPx + distPy * distPy) > 10 //do not include events too close to the foe
                     && getRelAngle(distPx, distPy, vx, vy) < validAngle * Math.PI / 180 //only include flow events diverging from foe
                     && threshVel < Math.sqrt(vx * vx + vy * vy) //only include flow events with sufficiently large flow velocity -> avoids noisy estimates
-                    ) // && vy < 0 && distPy < 0 ) // hack: only include flow events below the foe
+                    )
             {
                 // only use y estimate for ttc estimation
                 if (useYsly) {
@@ -357,6 +354,9 @@ public class TimeToContact extends EventFilter2D implements FrameAnnotater {
         // if an obstacle was hand selected, obtain the corresponding ttc estimate of the cluster
         if ((chip.getCanvas().getRenderer() != null) && (obstX != -1) && (obstY != -1)) {
             ttc = clusters.selectCluster(obstX, obstY);
+        }
+        else {
+            ttc = clusters.selectCluster();
         }
         if (importedGTfromFile) {
             if (ts>tsLoggedLast && ts>logBeginTime*1e6 && ts < logEndTime*1e6){
@@ -837,10 +837,31 @@ public class TimeToContact extends EventFilter2D implements FrameAnnotater {
                     }
                 }                                
             }            
-            if (idBestCluster > 0) {
-                return clusterList.get(idBestCluster).getTTC();
+            if (idBestCluster < 0) {
+                return 0;
             }
-            return 0;
+            return clusterList.get(idBestCluster).getTTC();
+        }
+        
+        // selects the cluster with the highest activity
+        public synchronized double selectCluster(){            
+            // id of cluster with greatest shared area
+            int idBestCluster = -1;
+            
+            double maxActivity = 0;
+            
+            int i = 0;            
+            for (Iterator<cluster> iterator = clusterList.iterator(); iterator.hasNext(); i++){
+                cluster cl = iterator.next();   
+                if (cl.clCountActivity > maxActivity) {
+                    maxActivity = cl.clCountActivity;
+                    idBestCluster = i;                    
+                }                                
+            }            
+            if (idBestCluster < 0) {
+                return 0;
+            }
+            return clusterList.get(idBestCluster).getTTC();
         }
 
         public void draw(GL2 gl) {
